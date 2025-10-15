@@ -2,6 +2,7 @@
 #include <Adafruit_ST77xx.h>
 #include <SPI.h>
 #include "rotary.h"
+#include <EEPROM.h>
 
 #define DHTPIN 4
 #define DHTTYPE DHT22
@@ -18,8 +19,13 @@
 #define CONTROL_INTERVAL 10000
 #define HYSTERESIS_TENTHS 5      // 0.5°C hysteresis
 #define ENCODER_STEP_TENTHS 1    // 0.1°C per encoder step
+#define ENCODER_PULSES_PER_STEP 4 // quadrature pulses per mechanical detent (tune if needed)
 #define BUTTON_DEBOUNCE_MS 250
 #define ENCODER_DEBOUNCE_MS 10   // debounce period for encoder (ms)
+
+// EEPROM persistence
+#define EEPROM_ADDR_TARGET 0
+#define SAVE_INTERVAL_MS 5000    // minimum interval between EEPROM writes
 
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_ST77xx tft = Adafruit_ST77xx(160, 80, TFT_CS, TFT_DC, TFT_RST);
@@ -32,6 +38,10 @@ volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
 volatile uint8_t rot_state = 0;
 volatile int16_t encoderPulseCount = 0;
 
+// Persistence helpers
+unsigned long lastSaveMs = 0;
+bool targetDirty = false;
+
 bool displayCelsius = true;
 unsigned long lastDHTReadMs = 0;
 unsigned long lastDisplayMs = 0;
@@ -43,13 +53,11 @@ unsigned long lastButtonMs = 0;
 unsigned long lastEncoderProcessedMs = 0;
 
 void encoderISR() {
-  // Minimal ISR: use rotary_step for quadrature decoding (rotb = DT, rota = CLK)
+  // Minimal ISR: use rotary_step_s16 to update encoderPulseCount directly.
+  // rotary_step_s16 performs the state update and increments/decrements the counter.
   uint8_t a = digitalRead(ROTARY_CLK); // rota (LSB)
   uint8_t b = digitalRead(ROTARY_DT);  // rotb (MSB)
-  int8_t step = rotary_step(&rot_state, b, a);
-  if (step) {
-    encoderPulseCount += step;
-  }
+  rotary_step_s16(&encoderPulseCount, &rot_state, b, a);
 }
 
 void setup() {
@@ -75,6 +83,15 @@ void setup() {
   lastDHTReadMs = millis();
   lastDisplayMs = millis();
   lastControlMs = millis();
+
+  // Load persisted target temperature (tenths of °C). Validate range, otherwise keep default.
+  int16_t saved = 0;
+  EEPROM.get(EEPROM_ADDR_TARGET, saved);
+  if (saved >= -400 && saved <= 500) {
+    targetTenthsC = saved;
+  }
+  // initialize save timestamp to avoid immediate write
+  lastSaveMs = millis();
 }
 
 void updateDisplay(float currentC, int16_t targetTenths) {
@@ -137,15 +154,26 @@ void loop() {
       int16_t steps = remainder / ENCODER_PULSES_PER_STEP;
       remainder = remainder % ENCODER_PULSES_PER_STEP;
 
-      if (steps != 0) {
+        if (steps != 0) {
         int16_t newTarget = targetTenthsC + (int16_t)(steps * ENCODER_STEP_TENTHS);
         if (newTarget < -400) newTarget = -400;
         if (newTarget > 500)  newTarget = 500;
-        targetTenthsC = newTarget;
-        // immediate feedback to user
-        updateDisplay(lastValidTempC, targetTenthsC);
+        if (newTarget != targetTenthsC) {
+          targetTenthsC = newTarget;
+          targetDirty = true; // mark for persistence
+          // immediate feedback to user
+          updateDisplay(lastValidTempC, targetTenthsC);
+        }
       }
     }
+  }
+
+  // Persist target temperature occasionally (rate-limited to SAVE_INTERVAL_MS)
+  if (targetDirty && (millis() - lastSaveMs >= SAVE_INTERVAL_MS)) {
+    int16_t toSave = targetTenthsC; // local copy
+    EEPROM.put(EEPROM_ADDR_TARGET, toSave);
+    lastSaveMs = millis();
+    targetDirty = false;
   }
 
   // (quadrature ISR handles bounce; no encoder lock needed)

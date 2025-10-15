@@ -40,8 +40,8 @@
  * Process quadrature rotary events in an interrupt handler so you don't miss
  * steps:
  * 
- * static volatile unsigned rot_state;
- * static volatile unsigned rot_pos;
+ * static volatile uint16_t rot_state;
+ * static volatile uint16_t rot_pos;
  * 
  * void setup() {
  *    attachInterrupt(digitalPinToInterrupt(PIN_X), &rot_onchange, CHANGE);
@@ -49,6 +49,14 @@
  * 
  * static void rot_onchange() {
  *    rot_pos += rotary_step(&rot_state, digitalRead(PIN_A), digitalRead(PIN_B));
+ * }
+ * 
+ * static void rot_onchange() {
+ *    rot_pos += rotary_step(&rot_state, digitalRead(PIN_A), digitalRead(PIN_B));
+ * }
+ * // or:
+ * static void rot_onchange16() {
+ *    rotary_step_u16(&rot_pos, &rot_state, digitalRead(PIN_A), digitalRead(PIN_B));
  * }
  */
 
@@ -77,19 +85,137 @@ enum ROTARY_TRANSITIONS {
 #define rotary_ccw(r) (((uint16_t)1 << (r)) & ROTARY_CCW)
 
 /**
+ * @brief Update the rotary state.
+ * 
+ * @param rotary Rotary encoder state
+ * @param rotb    Rotary encoder B pin state (MSB)
+ * @param rota    Rotary encoder A pin state (LSB)
+ * @return 1 if last move was counterclockwise, 0 otherwise
+ */
+#define rotary_write(rotary, rotb, rota) *rotary = (((*rotary) << 2) | (rotb << 1) | rota) & 0x0f
+
+/**
  * @brief Process a rotary encoder step.
  * 
  * @param rotary  Rotary encoder state
  * @param rotb    Rotary encoder B pin state (MSB)
  * @param rota    Rotary encoder A pin state (LSB)
  * @return 1 = one step clockwise, -1 = one step counter clockwise, 0 = invalid step
- * @remarks rotary state rolling history of the last 4 states, which are used to debounce invalid state transitions
+ * @remarks rotary state is a rolling history of the last 4 states, which are used to debounce invalid state transitions. This variant performs an unconditional store.
  */
 static inline int8_t rotary_step(volatile uint8_t *rotary, uint8_t rotb, uint8_t rota) {
-  *rotary = (uint8_t)((((uint16_t)(*rotary) << 2) | (rotb << 1) | rota) & 0xff);
+  rotary_write(rotary, rotb, rota);
   return rotary_cw(*rotary) ? 1:
          rotary_ccw(*rotary)?-1:
                               0;
+}
+
+/**
+ * @brief Process a rotary encoder step.
+ * 
+ * @param count   8-bit position
+ * @param rotary  Rotary encoder state
+ * @param rotb    Rotary encoder B pin state (MSB)
+ * @param rota    Rotary encoder A pin state (LSB)
+ * @return 1 = one step clockwise, -1 = one step counter clockwise, 0 = invalid step
+ * @remarks rotary state is a rolling history of the last 4 states, which are used to debounce invalid state transitions. This variant provides an 8-bit unsigned counter.
+ */
+static inline void rotary_step_u8(volatile uint8_t *count, volatile uint8_t *rotary, uint8_t rotb, uint8_t rota) {
+  rotary_write(rotary, rotb, rota);
+  if (rotary_cw(*rotary))
+    ++*count;
+  else if (rotary_ccw(*rotary))
+    --*count;
+}
+
+/**
+ * @brief Process a rotary encoder step.
+ * 
+ * @param count   8-bit position
+ * @param rotary  Rotary encoder state
+ * @param rotb    Rotary encoder B pin state (MSB)
+ * @param rota    Rotary encoder A pin state (LSB)
+ * @return 1 = one step clockwise, -1 = one step counter clockwise, 0 = invalid step
+ * @remarks rotary state is a rolling history of the last 4 states, which are used to debounce invalid state transitions. This variant provides an 8-bit signed counter.
+ */
+static inline void rotary_step_s8(volatile int8_t *count, volatile uint8_t *rotary, uint8_t rotb, uint8_t rota) {
+  rotary_write(rotary, rotb, rota);
+  if (rotary_cw(*rotary))
+    ++*count;
+  else if (rotary_ccw(*rotary))
+    --*count;
+}
+
+/**
+ * @brief Process a rotary encoder step.
+ * 
+ * @param count   16-bit position
+ * @param rotary  Rotary encoder state
+ * @param rotb    Rotary encoder B pin state (MSB)
+ * @param rota    Rotary encoder A pin state (LSB)
+ * @return 1 = one step clockwise, -1 = one step counter clockwise, 0 = invalid step
+ * @remarks rotary state is a rolling history of the last 4 states, which are used to debounce invalid state transitions. This variant provides a 16-bit unsigned counter.
+ */
+static inline void rotary_step_u16(volatile uint16_t *count, volatile uint8_t *rotary, uint8_t rotb, uint8_t rota) {
+  rotary_write(rotary, rotb, rota);
+  if (rotary_cw(*rotary))
+    ++*count;
+  else if (rotary_ccw(*rotary))
+    --*count;
+}
+
+/**
+ * @brief Process a rotary encoder step.
+ * 
+ * @param count   16-bit position
+ * @param rotary  Rotary encoder state
+ * @param rotb    Rotary encoder B pin state (MSB)
+ * @param rota    Rotary encoder A pin state (LSB)
+ * @return 1 = one step clockwise, -1 = one step counter clockwise, 0 = invalid step
+ * @remarks rotary state is a rolling history of the last 4 states, which are used to debounce invalid state transitions. This variant provides a 16-bit signed counter.
+ */
+static inline void rotary_step_s16(volatile int16_t *count, volatile uint8_t *rotary, uint8_t rotb, uint8_t rota) {
+  rotary_write(rotary, rotb, rota);
+  if (rotary_cw(*rotary))
+    ++*count;
+  else if (rotary_ccw(*rotary))
+    --*count;
+}
+
+/**
+ * @brief Process a rotary encoder step.
+ * 
+ * @param count   32-bit position
+ * @param rotary  Rotary encoder state
+ * @param rotb    Rotary encoder B pin state (MSB)
+ * @param rota    Rotary encoder A pin state (LSB)
+ * @return 1 = one step clockwise, -1 = one step counter clockwise, 0 = invalid step
+ * @remarks rotary state is a rolling history of the last 4 states, which are used to debounce invalid state transitions. This variant provides a 32-bit unsigned counter.
+ */
+static inline void rotary_step_u32(volatile uint32_t *count, volatile uint8_t *rotary, uint8_t rotb, uint8_t rota) {
+  rotary_write(rotary, rotb, rota);
+  if (rotary_cw(*rotary))
+    ++*count;
+  else if (rotary_ccw(*rotary))
+    --*count;
+}
+
+/**
+ * @brief Process a rotary encoder step.
+ * 
+ * @param count   32-bit position
+ * @param rotary  Rotary encoder state
+ * @param rotb    Rotary encoder B pin state (MSB)
+ * @param rota    Rotary encoder A pin state (LSB)
+ * @return 1 = one step clockwise, -1 = one step counter clockwise, 0 = invalid step
+ * @remarks rotary state is a rolling history of the last 4 states, which are used to debounce invalid state transitions. This variant provides a 32-bit signed counter.
+ */
+static inline void rotary_step_s32(volatile int32_t *count, volatile uint8_t *rotary, uint8_t rotb, uint8_t rota) {
+  rotary_write(rotary, rotb, rota);
+  if (rotary_cw(*rotary))
+    ++*count;
+  else if (rotary_ccw(*rotary))
+    --*count;
 }
 
 #endif
