@@ -84,11 +84,24 @@ void setup() {
   lastDisplayMs = millis();
   lastControlMs = millis();
 
-  // Load persisted target temperature (tenths of °C). Validate range, otherwise keep default.
+  // Load persisted target temperature (tenths of °C). Validate range, otherwise set to current measured temp if available.
   int16_t saved = 0;
   EEPROM.get(EEPROM_ADDR_TARGET, saved);
   if (saved >= -400 && saved <= 500) {
     targetTenthsC = saved;
+  } else {
+    // No valid saved value: try to initialize target from the current DHT reading.
+    float initTempC = dht.readTemperature();
+    if (isnan(initTempC)) {
+      // sensor may need a short time after power-up; try once more
+      delay(200);
+      initTempC = dht.readTemperature();
+    }
+    if (!isnan(initTempC)) {
+      targetTenthsC = (int16_t)round(initTempC * 10.0);
+      lastValidTempC = initTempC;
+    }
+    // otherwise keep the compiled-in default targetTenthsC
   }
   // initialize save timestamp to avoid immediate write
   lastSaveMs = millis();
