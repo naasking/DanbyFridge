@@ -1,6 +1,7 @@
 #include <DHT.h>
 #include <Adafruit_ST77xx.h>
 #include <SPI.h>
+#include "rotary.h"
 
 #define DHTPIN 4
 #define DHTTYPE DHT22
@@ -23,15 +24,13 @@
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_ST77xx tft = Adafruit_ST77xx(160, 80, TFT_CS, TFT_DC, TFT_RST);
 
-// Internal state stored in tenths of °C to avoid non-atomic float access
-volatile int16_t targetCentidegreesC = 250; // tenths of a degee C = 25.0°C
-volatile int8_t encoderDelta = 0;           // set from ISR
-volatile bool encoderChanged = false;
+ // Internal state stored in tenths of °C to avoid non-atomic float access
+volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
 
-// Encoder lock to prevent ISR cascade during bounce.
-// ISR sets encoderLocked=true immediately to block further ISR processing.
-// Loop clears encoderLocked after ENCODER_DEBOUNCE_MS have passed since processing.
-volatile bool encoderLocked = false;
+// Quadrature decoder state (4-bit history) and pulse accumulator.
+// ISR calls rotary_step() and increments encoderPulseCount.
+volatile uint8_t rot_state = 0;
+volatile int16_t encoderPulseCount = 0;
 
 bool displayCelsius = true;
 unsigned long lastDHTReadMs = 0;
@@ -44,20 +43,13 @@ unsigned long lastButtonMs = 0;
 unsigned long lastEncoderProcessedMs = 0;
 
 void encoderISR() {
-  // Minimal ISR: prevent cascade by checking encoderLocked,
-  // then record direction and set flags.
-  if (encoderLocked) return;
-
-  bool clk = digitalRead(ROTARY_CLK);
-  bool dt  = digitalRead(ROTARY_DT);
-
-  if (clk != dt) {
-    encoderDelta++; // CW
-  } else {
-    encoderDelta--; // CCW
+  // Minimal ISR: use rotary_step for quadrature decoding (rotb = DT, rota = CLK)
+  uint8_t a = digitalRead(ROTARY_CLK); // rota (LSB)
+  uint8_t b = digitalRead(ROTARY_DT);  // rotb (MSB)
+  int8_t step = rotary_step(&rot_state, b, a);
+  if (step) {
+    encoderPulseCount += step;
   }
-  encoderChanged = true;
-  encoderLocked = true; // immediately lock further ISR processing until loop clears it
 }
 
 void setup() {
@@ -131,32 +123,32 @@ void controlTemperature(float currentC, int16_t targetTenths) {
 void loop() {
   unsigned long now = millis();
 
-  // 1) Consume encoder changes (handled in loop to allow debouncing/time logic)
-  if (encoderChanged) {
+  // 1) Consume encoder pulses produced by the quadrature ISR and convert pulses -> steps
+  {
+    int16_t pulses = 0;
     noInterrupts();
-    int8_t d = encoderDelta;
-    encoderDelta = 0;
-    encoderChanged = false;
+    pulses = encoderPulseCount;
+    encoderPulseCount = 0;
     interrupts();
 
-    if (d != 0) {
-      int16_t newTarget = targetTenthsC + (int16_t)(d * ENCODER_STEP_TENTHS);
-      if (newTarget < -400) newTarget = -400;
-      if (newTarget > 500)  newTarget = 500;
-      targetTenthsC = newTarget;
+    if (pulses != 0) {
+      static int16_t remainder = 0;
+      remainder += pulses;
+      int16_t steps = remainder / ENCODER_PULSES_PER_STEP;
+      remainder = remainder % ENCODER_PULSES_PER_STEP;
 
-      // record when we processed this change so we can clear encoderLocked after debounce
-      lastEncoderProcessedMs = now;
-
-      // immediate feedback to user
-      updateDisplay(lastValidTempC, targetTenthsC);
+      if (steps != 0) {
+        int16_t newTarget = targetTenthsC + (int16_t)(steps * ENCODER_STEP_TENTHS);
+        if (newTarget < -400) newTarget = -400;
+        if (newTarget > 500)  newTarget = 500;
+        targetTenthsC = newTarget;
+        // immediate feedback to user
+        updateDisplay(lastValidTempC, targetTenthsC);
+      }
     }
   }
 
-  // 1.b) Clear encoder lock after debounce period so ISR can accept new stable steps
-  if (encoderLocked && (now - lastEncoderProcessedMs >= ENCODER_DEBOUNCE_MS)) {
-    encoderLocked = false;
-  }
+  // (quadrature ISR handles bounce; no encoder lock needed)
 
   // 2) Button handled and debounced in loop (no millis() in ISR)
   bool sw = digitalRead(ROTARY_SW);
