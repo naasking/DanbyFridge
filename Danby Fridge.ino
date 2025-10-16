@@ -3,6 +3,9 @@
 #include <SPI.h>
 #include "rotary.h"
 #include <EEPROM.h>
+#include <LowPower.h>
+#include <avr/sleep.h>
+#include <avr/interrupt.h>
 
 #define DHTPIN 4
 #define DHTTYPE DHT22
@@ -27,6 +30,12 @@
 #define EEPROM_ADDR_TARGET 0
 #define SAVE_INTERVAL_MS 5000    // minimum interval between EEPROM writes
 
+// Power management
+#define BACKLIGHT_PIN 7          // pin to control TFT backlight (default D7)
+#define WDT_SLEEP_S 8            // WDT sleep interval in seconds (LowPower SLEEP_8S)
+#define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
+#define DISPLAY_ON_AFTER_WAKE_MS 3000 // keep display on for some time after wake for user feedback
+
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_ST77xx tft = Adafruit_ST77xx(160, 80, TFT_CS, TFT_DC, TFT_RST);
 
@@ -44,13 +53,13 @@ bool targetDirty = false;
 
 bool displayCelsius = true;
 unsigned long lastDHTReadMs = 0;
-unsigned long lastDisplayMs = 0;
-unsigned long lastControlMs = 0;
+
+unsigned long displayOnUntilMs = 0;
+unsigned long wdtWakeCount = 0;
 
 float lastValidTempC = NAN;
 bool lastButtonState = HIGH;
 unsigned long lastButtonMs = 0;
-unsigned long lastEncoderProcessedMs = 0;
 
 void encoderISR() {
   // Minimal ISR: use rotary_step_s16 to update encoderPulseCount directly.
@@ -75,14 +84,16 @@ void setup() {
   pinMode(ROTARY_DT, INPUT_PULLUP);
   pinMode(ROTARY_SW, INPUT_PULLUP);
 
+  // Backlight control pin
+  pinMode(BACKLIGHT_PIN, OUTPUT);
+  digitalWrite(BACKLIGHT_PIN, HIGH); // turn on display backlight at startup
+
   attachInterrupt(digitalPinToInterrupt(ROTARY_CLK), encoderISR, CHANGE);
 
   // initialize relay OFF (assumes active HIGH; invert logic if needed)
   digitalWrite(RELAY_PIN, LOW);
 
   lastDHTReadMs = millis();
-  lastDisplayMs = millis();
-  lastControlMs = millis();
 
   // Load persisted target temperature (tenths of °C). Validate range, otherwise set to current measured temp if available.
   int16_t saved = 0;
@@ -105,6 +116,9 @@ void setup() {
   }
   // initialize save timestamp to avoid immediate write
   lastSaveMs = millis();
+
+  // ensure display shows current values at startup
+  updateDisplay(lastValidTempC, targetTenthsC);
 }
 
 void updateDisplay(float currentC, int16_t targetTenths) {
@@ -188,6 +202,26 @@ void loop() {
     lastSaveMs = millis();
     targetDirty = false;
   }
+  
+  // Keep display on for a short period after any updates for user feedback
+  if (millis() < displayOnUntilMs) {
+    digitalWrite(BACKLIGHT_PIN, HIGH);
+  } else {
+    digitalWrite(BACKLIGHT_PIN, LOW);
+  }
+  
+  //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and WDT (8s)
+  //  Only sleep if no recent activity and display not required.
+  bool idle = (encoderPulseCount == 0) && !targetDirty;
+  if (idle) {
+    // Turn off ADC to save power; LowPower.powerDown does ADC_OFF and BOD_OFF per call below.
+    // Sleep for 8s or until external interrupt (encoder/button) fires.
+    LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
+    // Woke up (either via WDT or external INT)
+    wdtWakeCount++;
+    // keep display on briefly after wake for feedback
+    displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
+  }
 
   // (quadrature ISR handles bounce; no encoder lock needed)
 
@@ -208,15 +242,25 @@ void loop() {
     lastDHTReadMs = now;
   }
 
-  // 4) Periodic display update
-  if (now - lastDisplayMs >= DISPLAY_UPDATE_INTERVAL) {
-    updateDisplay(lastValidTempC, targetTenthsC);
-    lastDisplayMs = now;
+
+  // 5) Control relay periodically using WDT wake count approximation
+  // WDT interval roughly WDT_SLEEP_S seconds per LowPower wake.
+  // Add elapsed seconds since last WDT wake (approx)
+  // Use wdtWakeCount as a coarse timer: multiply by WDT_SLEEP_S
+  unsigned long elapsedS = wdtWakeCount * WDT_SLEEP_S;
+  if (elapsedS >= CONTROL_INTERVAL_S) {
+    // Clear accumulated wake count
+    wdtWakeCount = 0;
+    // Trigger DHT read / control (do not read from ISR)
+    float tempC = dht.readTemperature();
+    if (!isnan(tempC)) {
+      lastValidTempC = tempC;
+      controlTemperature(lastValidTempC, targetTenthsC);
+      // update display with new current temp
+      updateDisplay(lastValidTempC, targetTenthsC);
+    } else {
+      Serial.println("DHT read failed (sleep-wakeup)");
+    }
   }
 
-  // 5) Control relay periodically
-  if (now - lastControlMs >= CONTROL_INTERVAL) {
-    controlTemperature(lastValidTempC, targetTenthsC);
-    lastControlMs = now;
-  }
 }
