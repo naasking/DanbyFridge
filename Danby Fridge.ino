@@ -7,6 +7,7 @@
 #include <avr/sleep.h>
 #include <avr/interrupt.h>
 
+// === For Arduino Nano ===
 #define DHTPIN 4
 #define DHTTYPE DHT22
 #define RELAY_PIN 5
@@ -16,6 +17,26 @@
 #define TFT_CS 10
 #define TFT_RST 9
 #define TFT_DC 8
+#define BACKLIGHT_PIN 7          // pin to control TFT backlight (default D7)
+
+// // === ESP32-C3 Mini Pin Remapping ===
+// #define DHTPIN          0   // GPIO0
+// #define RELAY_PIN       1   // GPIO1
+// #define ROTARY_CLK      2   // GPIO2
+// #define ROTARY_DT       3   // GPIO3
+// #define ROTARY_SW       10  // GPIO10 (has pull-up, interrupt capable)
+// #define TFT_CS          7   // GPIO7
+// #define TFT_DC          8   // GPIO8
+// #define TFT_RST         9   // GPIO9
+// #define TFT_MOSI        4   // GPIO4 (fixed MOSI)
+// #define TFT_SCK         6   // GPIO6 (fixed SCK)
+// #define BACKLIGHT_PIN   5   // GPIO5 (PWM-capable)
+
+// === Notes ===
+// - All pins are 3.3V only (no 5V tolerance).
+// - GPIO0 is strapping: keep it pulled high at boot if used for DHT.
+// - If your board exposes GPIO18/19, you can swap them in for less conflict.
+// - Replace EEPROM/LowPower libraries with Preferences + esp_sleep APIs.
 
 #define DISPLAY_UPDATE_INTERVAL 200
 #define DHT_READ_INTERVAL 1000
@@ -32,7 +53,6 @@
 #define SAVE_INTERVAL_MS 5000    // minimum interval between EEPROM writes
 
 // Power management
-#define BACKLIGHT_PIN 7          // pin to control TFT backlight (default D7)
 #define WDT_SLEEP_S 8            // WDT sleep interval in seconds (LowPower SLEEP_8S)
 #define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
 #define DISPLAY_ON_AFTER_WAKE_MS 3000 // keep display on for some time after wake for user feedback
