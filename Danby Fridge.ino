@@ -25,6 +25,7 @@
 #define ENCODER_PULSES_PER_STEP 4 // quadrature pulses per mechanical detent (tune if needed)
 #define BUTTON_DEBOUNCE_MS 250
 #define ENCODER_DEBOUNCE_MS 10   // debounce period for encoder (ms)
+#define LONG_PRESS_MS 1000 // ms for long press to toggle units
 
 // EEPROM persistence
 #define EEPROM_ADDR_TARGET 0
@@ -35,6 +36,7 @@
 #define WDT_SLEEP_S 8            // WDT sleep interval in seconds (LowPower SLEEP_8S)
 #define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
 #define DISPLAY_ON_AFTER_WAKE_MS 3000 // keep display on for some time after wake for user feedback
+#define COMPRESSOR_MIN_OFF_MS (3UL * 60UL * 1000UL) // 3 minutes minimum off time for compressor starter
 
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_ST77xx tft = Adafruit_ST77xx(160, 80, TFT_CS, TFT_DC, TFT_RST);
@@ -60,6 +62,7 @@ unsigned long wdtWakeCount = 0;
 float lastValidTempC = NAN;
 bool lastButtonState = HIGH;
 unsigned long lastButtonMs = 0;
+unsigned long pressStartMs = 0;
 
 void encoderISR() {
   // Minimal ISR: use rotary_step_s16 to update encoderPulseCount directly.
@@ -67,6 +70,12 @@ void encoderISR() {
   uint8_t a = digitalRead(ROTARY_CLK); // rota (LSB)
   uint8_t b = digitalRead(ROTARY_DT);  // rotb (MSB)
   rotary_step_s16(&encoderPulseCount, &rot_state, b, a);
+}
+
+// Wake-only ISR for the rotary button: intentionally empty so its only effect
+// is to wake the MCU from sleep. Debounce and button handling remain in loop().
+void wakeISR() {
+  // no-op: wake-only
 }
 
 void setup() {
@@ -89,6 +98,9 @@ void setup() {
   digitalWrite(BACKLIGHT_PIN, HIGH); // turn on display backlight at startup
 
   attachInterrupt(digitalPinToInterrupt(ROTARY_CLK), encoderISR, CHANGE);
+  // Wake-only interrupt for rotary pushbutton (FALLING edge). ISR does nothing
+  // beyond waking the MCU; actual button processing is done in the loop.
+  attachInterrupt(digitalPinToInterrupt(ROTARY_SW), wakeISR, FALLING);
 
   // initialize relay OFF (assumes active HIGH; invert logic if needed)
   digitalWrite(RELAY_PIN, LOW);
@@ -227,11 +239,23 @@ void loop() {
 
   // 2) Button handled and debounced in loop (no millis() in ISR)
   bool sw = digitalRead(ROTARY_SW);
+
   if (sw == LOW && lastButtonState == HIGH && (now - lastButtonMs) > BUTTON_DEBOUNCE_MS) {
-    displayCelsius = !displayCelsius;
+    // Button pressed (debounced start)
+    pressStartMs = now;
     lastButtonMs = now;
-    updateDisplay(lastValidTempC, targetTenthsC);
   }
+
+  if (sw == HIGH && lastButtonState == LOW) {
+    // Button released, check duration
+    unsigned long pressDuration = now - pressStartMs;
+    if (pressDuration >= LONG_PRESS_MS) {
+      displayCelsius = !displayCelsius;
+      updateDisplay(lastValidTempC, targetTenthsC);
+    }
+    lastButtonMs = now;
+  }
+
   lastButtonState = sw;
 
   // 3) Read DHT at interval, save last valid
