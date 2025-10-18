@@ -36,7 +36,10 @@
 #define WDT_SLEEP_S 8            // WDT sleep interval in seconds (LowPower SLEEP_8S)
 #define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
 #define DISPLAY_ON_AFTER_WAKE_MS 3000 // keep display on for some time after wake for user feedback
-#define COMPRESSOR_MIN_OFF_MS (3UL * 60UL * 1000UL) // 3 minutes minimum off time for compressor starter
+#define COMPRESSOR_MIN_OFF_MS (4UL * 60UL * 1000UL) // 4 minutes minimum off time for compressor starter
+// DHT read retry settings
+#define DHT_MAX_RETRIES 3
+#define DHT_RETRY_DELAY_MS 200
 
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_ST77xx tft = Adafruit_ST77xx(160, 80, TFT_CS, TFT_DC, TFT_RST);
@@ -49,9 +52,13 @@ volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
 volatile uint8_t rot_state = 0;
 volatile int16_t encoderPulseCount = 0;
 
-// Persistence helpers
+ // Persistence helpers
 unsigned long lastSaveMs = 0;
 bool targetDirty = false;
+
+// Compressor/relay safety
+bool relayOn = false;
+unsigned long lastRelayOffMs = 0;
 
 bool displayCelsius = true;
 unsigned long lastDHTReadMs = 0;
@@ -114,12 +121,8 @@ void setup() {
     targetTenthsC = saved;
   } else {
     // No valid saved value: try to initialize target from the current DHT reading.
-    float initTempC = dht.readTemperature();
-    if (isnan(initTempC)) {
-      // sensor may need a short time after power-up; try once more
-      delay(200);
-      initTempC = dht.readTemperature();
-    }
+    float initTempC = readTempWithRetries();
+    // readTempWithRetries handles retries and returns NAN on failure
     if (!isnan(initTempC)) {
       targetTenthsC = (int16_t)round(initTempC * 10.0);
       lastValidTempC = initTempC;
@@ -134,11 +137,14 @@ void setup() {
 }
 
 void updateDisplay(float currentC, int16_t targetTenths) {
-  // Simple full redraw. For less flicker, update only changed fields.
+  // Full-screen redraw but use color to distinguish current (white) and target (light blue).
   tft.fillScreen(ST77XX_BLACK);
-  tft.setCursor(4, 8);
+
   tft.setTextSize(2);
-  tft.print("Cur: ");
+
+  // Current temperature (left)
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(8, 18);
   if (isnan(currentC)) {
     tft.print("Err");
   } else {
@@ -151,8 +157,11 @@ void updateDisplay(float currentC, int16_t targetTenths) {
       tft.print(" F");
     }
   }
-  tft.setCursor(4, 36);
-  tft.print("Tgt: ");
+
+  // Target temperature (right) in light blue
+  uint16_t lightBlue = tft.color565(173, 216, 230); // light blue (RGB: 173,216,230)
+  tft.setTextColor(lightBlue);
+  tft.setCursor(96, 18);
   float tgtC = targetTenths / 10.0;
   if (displayCelsius) {
     tft.print(tgtC, 1);
@@ -162,17 +171,70 @@ void updateDisplay(float currentC, int16_t targetTenths) {
     tft.print(tf, 1);
     tft.print(" F");
   }
+
+  // Compressor running indicator (snowflake) between the values
+  // Draw a simple snowflake icon centered at (80, 20)
+  int cx = 80;
+  int cy = 24;
+  if (relayOn) {
+    uint16_t iconColor = lightBlue;
+    // central dot
+    tft.drawPixel(cx, cy, iconColor);
+    // main arms
+    tft.drawLine(cx - 6, cy, cx + 6, cy, iconColor); // horizontal
+    tft.drawLine(cx, cy - 6, cx, cy + 6, iconColor); // vertical
+    // diagonals
+    tft.drawLine(cx - 4, cy - 4, cx + 4, cy + 4, iconColor);
+    tft.drawLine(cx - 4, cy + 4, cx + 4, cy - 4, iconColor);
+    // small branches on arms
+    tft.drawPixel(cx - 6, cy - 1, iconColor);
+    tft.drawPixel(cx - 6, cy + 1, iconColor);
+    tft.drawPixel(cx + 6, cy - 1, iconColor);
+    tft.drawPixel(cx + 6, cy + 1, iconColor);
+    tft.drawPixel(cx - 1, cy - 6, iconColor);
+    tft.drawPixel(cx + 1, cy - 6, iconColor);
+    tft.drawPixel(cx - 1, cy + 6, iconColor);
+    tft.drawPixel(cx + 1, cy + 6, iconColor);
+  } else {
+    // If compressor off, optionally draw a faint outline or nothing. We'll draw nothing.
+  }
+}
+
+static float readTempWithRetries() {
+  for (int i = 0; i < DHT_MAX_RETRIES; ++i) {
+    float t = dht.readTemperature();
+    if (!isnan(t)) return t;
+    if (i < DHT_MAX_RETRIES - 1) delay(DHT_RETRY_DELAY_MS);
+  }
+  return NAN;
 }
 
 void controlTemperature(float currentC, int16_t targetTenths) {
-  if (isnan(currentC)) return; // do not change relay on sensor error
-  int16_t currentTenths = (int16_t)round(currentC * 10.0);
+  // If the reading is invalid, skip control to avoid spurious changes.
+  if (isnan(currentC)) return;
 
-  // Hysteresis control
+  int16_t currentTenths = (int16_t)round(currentC * 10.0);
+  unsigned long now = millis();
+
+  // Need to turn ON when current is below target minus hysteresis.
   if (currentTenths <= (targetTenths - HYSTERESIS_TENTHS)) {
-    digitalWrite(RELAY_PIN, HIGH); // ON
-  } else if (currentTenths >= (targetTenths + HYSTERESIS_TENTHS)) {
-    digitalWrite(RELAY_PIN, LOW);  // OFF
+    // Only allow starting compressor if it is currently off and the minimum off time has elapsed.
+    if (!relayOn) {
+      if ((now - lastRelayOffMs) >= COMPRESSOR_MIN_OFF_MS) {
+        digitalWrite(RELAY_PIN, HIGH);
+        relayOn = true;
+      } else {
+        // Still in minimum-off window: do not start yet.
+      }
+    }
+  }
+  // Need to turn OFF when current is above target plus hysteresis.
+  else if (currentTenths >= (targetTenths + HYSTERESIS_TENTHS)) {
+    if (relayOn) {
+      digitalWrite(RELAY_PIN, LOW);
+      relayOn = false;
+      lastRelayOffMs = now;
+    }
   }
 }
 
