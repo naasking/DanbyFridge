@@ -17,6 +17,8 @@
 #define TFT_CS 10
 #define TFT_RST 9
 #define TFT_DC 8
+// #define TFT_MOSI        11   // GPIO4 (fixed MOSI - SDA on TFT)
+// #define TFT_SCK         13   // GPIO6 (fixed SCK - SCL on TFT)
 #define BACKLIGHT_PIN 7          // pin to control TFT backlight (default D7)
 
 // // === ESP32-C3 Mini Pin Remapping ===
