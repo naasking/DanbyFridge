@@ -1,38 +1,41 @@
 #include <DHT.h>
 #include <Adafruit_ST77xx.h>
-#include <SPI.h>
+#include <SPI.h>                 // ESP32 core SPI
+#include <Preferences.h>         // replaces EEPROM.h
 #include "rotary.h"
-#include <EEPROM.h>
-#include <LowPower.h>
-#include <avr/sleep.h>
-#include <avr/interrupt.h>
+#include <esp_sleep.h>
+#include <esp_pm.h>
 
-// === For Arduino Nano ===
-#define DHTPIN 4
 #define DHTTYPE DHT22
-#define RELAY_PIN 5
-#define ROTARY_CLK 2
-#define ROTARY_DT 6
-#define ROTARY_SW 3
-#define TFT_CS 10
-#define TFT_RST 9
-#define TFT_DC 8
-// #define TFT_MOSI        11   // GPIO4 (fixed MOSI - SDA on TFT)
-// #define TFT_SCK         13   // GPIO6 (fixed SCK - SCL on TFT)
-#define BACKLIGHT_PIN 7          // pin to control TFT backlight (default D7)
+// Preferences instance for non-volatile storage on ESP32
+static Preferences prefs;
 
-// // === ESP32-C3 Mini Pin Remapping ===
-// #define DHTPIN          0   // GPIO0
-// #define RELAY_PIN       1   // GPIO1
-// #define ROTARY_CLK      2   // GPIO2
-// #define ROTARY_DT       3   // GPIO3
-// #define ROTARY_SW       10  // GPIO10 (has pull-up, interrupt capable)
-// #define TFT_CS          7   // GPIO7
-// #define TFT_DC          8   // GPIO8
-// #define TFT_RST         9   // GPIO9
-// #define TFT_MOSI        4   // GPIO4 (fixed MOSI)
-// #define TFT_SCK         6   // GPIO6 (fixed SCK)
-// #define BACKLIGHT_PIN   5   // GPIO5 (PWM-capable)
+// // === For Arduino Nano ===
+// #define DHTPIN 4
+// #define DHTTYPE DHT22
+// #define RELAY_PIN 5
+// #define ROTARY_CLK 2
+// #define ROTARY_DT 6
+// #define ROTARY_SW 3
+// #define TFT_CS 10
+// #define TFT_RST 9
+// #define TFT_DC 8
+// // #define TFT_MOSI        11   // GPIO4 (fixed MOSI - SDA on TFT)
+// // #define TFT_SCK         13   // GPIO6 (fixed SCK - SCL on TFT)
+// #define BACKLIGHT_PIN 7          // pin to control TFT backlight (default D7)
+
+// === ESP32-C3 Mini Pin Remapping ===
+#define DHTPIN          0   // GPIO0
+#define RELAY_PIN       1   // GPIO1
+#define ROTARY_CLK      2   // GPIO2
+#define ROTARY_DT       3   // GPIO3
+#define ROTARY_SW       10  // GPIO10 (has pull-up, interrupt capable)
+#define TFT_CS          7   // GPIO7
+#define TFT_DC          8   // GPIO8
+#define TFT_RST         9   // GPIO9
+#define TFT_MOSI        4   // GPIO4 (fixed MOSI)
+#define TFT_SCK         6   // GPIO6 (fixed SCK)
+#define BACKLIGHT_PIN   5   // GPIO5 (PWM-capable)
 
 // === Notes ===
 // - All pins are 3.3V only (no 5V tolerance).
@@ -93,7 +96,7 @@ bool lastButtonState = HIGH;
 unsigned long lastButtonMs = 0;
 unsigned long pressStartMs = 0;
 
-void encoderISR() {
+void IRAM_ATTR encoderISR() {
   // Minimal ISR: use rotary_step_s16 to update encoderPulseCount directly.
   // rotary_step_s16 performs the state update and increments/decrements the counter.
   uint8_t a = digitalRead(ROTARY_CLK); // rota (LSB)
@@ -103,7 +106,7 @@ void encoderISR() {
 
 // Wake-only ISR for the rotary button: intentionally empty so its only effect
 // is to wake the MCU from sleep. Debounce and button handling remain in loop().
-void wakeISR() {
+void IRAM_ATTR wakeISR() {
   // no-op: wake-only
 }
 
@@ -111,11 +114,17 @@ void setup() {
   Serial.begin(115200);
   dht.begin();
 
+  // Initialize SPI with explicit pins for ESP32-C3
+  SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
+
+  // Initialize display inside an SPI transaction for consistent bus settings
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
   tft.initSPI();
   tft.setRotation(2);
   tft.fillScreen(ST77XX_BLACK);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(2);
+  SPI.endTransaction();
 
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(ROTARY_CLK, INPUT_PULLUP);
@@ -137,20 +146,25 @@ void setup() {
   lastDHTReadMs = millis();
 
   // Load persisted target temperature (tenths of °C). Validate range, otherwise set to current measured temp if available.
-  int16_t saved = 0;
-  EEPROM.get(EEPROM_ADDR_TARGET, saved);
+   prefs.begin("fridge", false);
+
+  // Try to load saved target
+  int16_t saved = prefs.getShort("targetC", INT16_MIN);
   if (saved >= -400 && saved <= 500) {
+    // Valid persisted value
     targetTenthsC = saved;
   } else {
-    // No valid saved value: try to initialize target from the current DHT reading.
+    // No valid saved value: try to initialize from current DHT reading
     float initTempC = readTempWithRetries();
-    // readTempWithRetries handles retries and returns NAN on failure
     if (!isnan(initTempC)) {
       targetTenthsC = (int16_t)round(initTempC * 10.0);
       lastValidTempC = initTempC;
     }
-    // otherwise keep the compiled-in default targetTenthsC
+    // else: keep compiled‑in default (250 = 25.0 °C) only as a last resort
   }
+  // keep Preferences open for the lifetime of the program (do not end here)
+  // prefs.end(); // removed to keep prefs active
+
   // initialize save timestamp to avoid immediate write
   lastSaveMs = millis();
 
@@ -159,6 +173,9 @@ void setup() {
 }
 
 void updateDisplay(float currentC, int16_t targetTenths) {
+  // Wrap display operations in an SPI transaction to ensure the bus runs at the desired speed
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+
   // Full-screen redraw but use color to distinguish current (white) and target (light blue).
   tft.fillScreen(ST77XX_BLACK);
 
@@ -220,6 +237,8 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   } else {
     // If compressor off, optionally draw a faint outline or nothing. We'll draw nothing.
   }
+
+  SPI.endTransaction();
 }
 
 static float readTempWithRetries() {
@@ -294,7 +313,8 @@ void loop() {
   // Persist target temperature occasionally (rate-limited to SAVE_INTERVAL_MS)
   if (targetDirty && (millis() - lastSaveMs >= SAVE_INTERVAL_MS)) {
     int16_t toSave = targetTenthsC; // local copy
-    EEPROM.put(EEPROM_ADDR_TARGET, toSave);
+    // Preferences is already opened in setup and kept open; just write the value
+    prefs.putShort("targetC", toSave);
     lastSaveMs = millis();
     targetDirty = false;
   }
@@ -306,14 +326,15 @@ void loop() {
     digitalWrite(BACKLIGHT_PIN, LOW);
   }
   
-  //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and WDT (8s)
+  //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and timer (approx WDT)
   //  Only sleep if no recent activity and display not required.
   bool idle = (encoderPulseCount == 0) && !targetDirty;
   if (idle) {
-    // Turn off ADC to save power; LowPower.powerDown does ADC_OFF and BOD_OFF per call below.
-    // Sleep for 8s or until external interrupt (encoder/button) fires.
-    LowPower.powerDown(SLEEP_8S, ADC_OFF, BOD_OFF);
-    // Woke up (either via WDT or external INT)
+    // Configure timer wake for approximately WDT_SLEEP_S seconds (esp_light_sleep)
+    esp_sleep_enable_timer_wakeup((uint64_t)WDT_SLEEP_S * 1000000ULL);
+    // Enter light sleep; external interrupts attached with attachInterrupt() will also wake the chip
+    esp_light_sleep_start();
+    // Woke up (either via timer or external INT)
     wdtWakeCount++;
     // keep display on briefly after wake for feedback
     displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
@@ -359,8 +380,8 @@ void loop() {
   if (elapsedS >= CONTROL_INTERVAL_S) {
     // Clear accumulated wake count
     wdtWakeCount = 0;
-    // Trigger DHT read / control (do not read from ISR)
-    float tempC = dht.readTemperature();
+    // Trigger DHT read / control with retry logic (do not read from ISR)
+    float tempC = readTempWithRetries();
     if (!isnan(tempC)) {
       lastValidTempC = tempC;
       controlTemperature(lastValidTempC, targetTenthsC);
