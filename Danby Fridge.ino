@@ -5,6 +5,11 @@
 #include "rotary.h"
 #include <esp_sleep.h>
 #include <esp_pm.h>
+#include "driver/rmt.h"
+#include "soc/rmt_reg.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/ringbuf.h"
+#include <vector>
 
 #define DHTTYPE DHT22
 // Preferences instance for non-volatile storage on ESP32
@@ -76,14 +81,24 @@ volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
 // ISR calls rotary_step() and increments encoderPulseCount.
 volatile uint8_t rot_state = 0;
 volatile int16_t encoderPulseCount = 0;
-
+ 
  // Persistence helpers
 unsigned long lastSaveMs = 0;
 bool targetDirty = false;
 
-// Compressor/relay safety
+// RMT-based async DHT read state (non-blocking receive)
+static const rmt_channel_t DHT_RMT_CHANNEL = RMT_CHANNEL_0;
+static RingbufHandle_t dhtRmtRb = NULL;
+static bool dhtRmtActive = false;
+static unsigned long dhtRmtStartMs = 0;
+static rmt_config_t dhtRmtConfig;
+
+ // Compressor/relay safety
 bool relayOn = false;
 unsigned long lastRelayOffMs = 0;
+
+ // DHT read state helpers
+static bool controlReadPending = false;
 
 bool displayCelsius = true;
 unsigned long lastDHTReadMs = 0;
@@ -113,6 +128,29 @@ void IRAM_ATTR wakeISR() {
 void setup() {
   Serial.begin(115200);
   dht.begin();
+
+  // Initialize RMT for DHT non-blocking reads once (driver + ringbuffer)
+  {
+    rmt_config_t rmt_rx;
+    rmt_rx.rmt_mode = RMT_MODE_RX;
+    rmt_rx.channel = DHT_RMT_CHANNEL;
+    rmt_rx.gpio_num = (gpio_num_t)DHTPIN;
+    rmt_rx.clk_div = 80; // 1us resolution
+    rmt_rx.mem_block_num = 2;
+    // Apply config and install driver once
+    if (rmt_config(&rmt_rx) == ESP_OK) {
+      if (rmt_driver_install(rmt_rx.channel, 1000, 0) == ESP_OK) {
+        // obtain ringbuffer handle (used by pollRmtDhtAttempt)
+        rmt_get_ringbuf_handle(rmt_rx.channel, &dhtRmtRb);
+        // keep driver installed for subsequent reads; do not uninstall until program end
+      } else {
+        Serial.println("RMT driver install failed");
+      }
+    } else {
+      Serial.println("RMT config failed");
+    }
+    // Note: dhtRmtRb may be NULL if driver/ringbuf not available; startRmtDhtAttempt will check
+  }
 
   // Initialize SPI with explicit pins for ESP32-C3
   SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
@@ -154,13 +192,8 @@ void setup() {
     // Valid persisted value
     targetTenthsC = saved;
   } else {
-    // No valid saved value: try to initialize from current DHT reading
-    float initTempC = readTempWithRetries();
-    if (!isnan(initTempC)) {
-      targetTenthsC = (int16_t)round(initTempC * 10.0);
-      lastValidTempC = initTempC;
-    }
-    // else: keep compiled‑in default (250 = 25.0 °C) only as a last resort
+    // No valid saved value: use default target (25.0 °C)
+    targetTenthsC = 250;
   }
   // keep Preferences open for the lifetime of the program (do not end here)
   // prefs.end(); // removed to keep prefs active
@@ -241,13 +274,164 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   SPI.endTransaction();
 }
 
-static float readTempWithRetries() {
-  for (int i = 0; i < DHT_MAX_RETRIES; ++i) {
-    float t = dht.readTemperature();
-    if (!isnan(t)) return t;
-    if (i < DHT_MAX_RETRIES - 1) delay(DHT_RETRY_DELAY_MS);
+static bool startRmtDhtAttempt() {
+  // Configure and start an RMT receive attempt; returns true if started
+  rmt_config_t rmt_rx;
+  rmt_rx.rmt_mode = RMT_MODE_RX;
+  rmt_rx.channel = DHT_RMT_CHANNEL;
+  rmt_rx.gpio_num = (gpio_num_t)DHTPIN;
+  rmt_rx.clk_div = 80; // 1us resolution
+  rmt_rx.mem_block_num = 2;
+  // Use default rx config fields
+  if (rmt_config(&rmt_rx) != ESP_OK) return false;
+  if (rmt_driver_install(rmt_rx.channel, 1000, 0) != ESP_OK) return false;
+
+  // Get ring buffer handle
+  rmt_get_ringbuf_handle(rmt_rx.channel, &dhtRmtRb);
+  if (!dhtRmtRb) {
+    rmt_driver_uninstall(rmt_rx.channel);
+    return false;
   }
-  return NAN;
+
+  // Send start signal: pull pin low for 2 ms, then high ~40 us
+  pinMode(DHTPIN, OUTPUT);
+  digitalWrite(DHTPIN, LOW);
+  ets_delay_us(2000); // 2 ms
+  digitalWrite(DHTPIN, HIGH);
+  ets_delay_us(40); // 40 us
+  pinMode(DHTPIN, INPUT_PULLUP);
+
+  // Start receiving
+  if (rmt_rx_start(rmt_rx.channel, true) != ESP_OK) {
+    vRingbufferReturnItem(dhtRmtRb, NULL); // ensure clean
+    rmt_driver_uninstall(rmt_rx.channel);
+    return false;
+  }
+
+  dhtRmtActive = true;
+  dhtRmtStartMs = millis();
+  return true;
+}
+
+// Non-blocking poll: returns NAN if no result yet, or temperature if data ready, or NaN when attempt exhausted.
+static float pollRmtDhtAttempt() {
+  if (!dhtRmtActive) return NAN;
+
+  // Try to receive available buffer without blocking
+  size_t rx_size = 0;
+  rmt_item32_t* items = (rmt_item32_t*) xRingbufferReceive(dhtRmtRb, &rx_size, 0);
+  if (!items) {
+    // No data yet. Check timeout (300 ms) to consider attempt failed.
+    if (millis() - dhtRmtStartMs > 300) {
+      // timeout: clean up and mark not active
+      rmt_rx_stop(DHT_RMT_CHANNEL);
+      vRingbufferReturnItem(dhtRmtRb, NULL);
+      rmt_driver_uninstall(DHT_RMT_CHANNEL);
+      dhtRmtActive = false;
+      return NAN;
+    }
+    return NAN; // still waiting
+  }
+
+  int item_count = rx_size / sizeof(rmt_item32_t);
+
+  // Collect high durations
+  std::vector<uint32_t> highs;
+  highs.reserve(64);
+  for (int i = 0; i < item_count; ++i) {
+    if (items[i].level0 == 1) highs.push_back(items[i].duration0);
+    if (items[i].level1 == 1) highs.push_back(items[i].duration1);
+  }
+
+  // Return RMT buffer
+  vRingbufferReturnItem(dhtRmtRb, (void*)items);
+
+  // Stop and uninstall driver
+  rmt_rx_stop(DHT_RMT_CHANNEL);
+  rmt_driver_uninstall(DHT_RMT_CHANNEL);
+  dhtRmtActive = false;
+
+  // Filter relevant highs
+  std::vector<uint32_t> bitHighs;
+  for (auto d : highs) {
+    if (d > 20) bitHighs.push_back(d);
+  }
+  if (bitHighs.size() < 40) return NAN;
+
+  std::vector<uint8_t> bits;
+  for (size_t i = 0; i < bitHighs.size() && bits.size() < 40; ++i) {
+    uint32_t dur = bitHighs[i];
+    bits.push_back(dur > 50 ? 1 : 0);
+  }
+  if (bits.size() < 40) return NAN;
+
+  uint8_t data[5] = {0};
+  for (int i = 0; i < 40; ++i) {
+    data[i/8] <<= 1;
+    data[i/8] |= bits[i];
+  }
+  uint8_t sum = data[0] + data[1] + data[2] + data[3];
+  if (sum != data[4]) return NAN;
+
+  int16_t rawHum = (data[0] << 8) | data[1];
+  int16_t rawTemp = (data[2] << 8) | data[3];
+  float tempC = 0.0f;
+  if (rawTemp & 0x8000) {
+    rawTemp &= 0x7FFF;
+    tempC = -(rawTemp / 10.0f);
+  } else {
+    tempC = rawTemp / 10.0f;
+  }
+  return tempC;
+}
+
+// Non-blocking retry manager: starts attempts and polls them over multiple loop iterations.
+// Call startDhtRetries() to begin; call pollDhtRetries(&outTemp) repeatedly until it returns true (done).
+static int dhtRetriesLeft = 0;
+static unsigned long dhtNextAttemptMs = 0;
+static bool dhtRetryActive = false;
+
+static void startDhtRetries() {
+  dhtRetriesLeft = DHT_MAX_RETRIES;
+  dhtNextAttemptMs = millis();
+  dhtRetryActive = true;
+  dhtRmtActive = false;
+}
+
+static bool pollDhtRetries(float* outTemp) {
+  if (!dhtRetryActive) return false;
+
+  unsigned long now = millis();
+
+  if (dhtRmtActive) {
+    float res = pollRmtDhtAttempt();
+    if (!isnan(res)) {
+      *outTemp = res;
+      dhtRetryActive = false;
+      return true;
+    }
+    // still waiting for RMT data
+    return false;
+  } else {
+    if (now >= dhtNextAttemptMs) {
+      // Start a new RMT attempt
+      if (startRmtDhtAttempt()) {
+        // attempt started, poll in subsequent loop iterations
+        return false;
+      } else {
+        // failed to start RMT; treat as attempt used
+        dhtRetriesLeft--;
+        if (dhtRetriesLeft <= 0) {
+          dhtRetryActive = false;
+          *outTemp = NAN;
+          return true;
+        }
+        dhtNextAttemptMs = now + DHT_RETRY_DELAY_MS;
+        return false;
+      }
+    }
+    return false;
+  }
 }
 
 void controlTemperature(float currentC, int16_t targetTenths) {
@@ -363,12 +547,31 @@ void loop() {
 
   lastButtonState = sw;
 
-  // 3) Read DHT at interval, save last valid
+  // 3) Start non-blocking DHT read sequence when interval reached, and poll progress
   if (now - lastDHTReadMs >= DHT_READ_INTERVAL) {
-    float tempC = dht.readTemperature();
-    if (!isnan(tempC)) lastValidTempC = tempC;
-    else Serial.println("DHT read failed");
+    startDhtRetries();
     lastDHTReadMs = now;
+  }
+
+  // Poll any in-progress non-blocking DHT attempt (RMT); handle initial/control outcomes
+  {
+    float dhtTemp;
+    if (dhtRetryActive) {
+      if (pollDhtRetries(&dhtTemp)) {
+        if (!isnan(dhtTemp)) {
+          lastValidTempC = dhtTemp;
+          if (controlReadPending) {
+            controlReadPending = false;
+            controlTemperature(lastValidTempC, targetTenthsC);
+            updateDisplay(lastValidTempC, targetTenthsC);
+          }
+        } else {
+          Serial.println("DHT read failed (retries)");
+          // clear pending flags on failure
+          controlReadPending = false;
+        }
+      }
+    }
   }
 
 
@@ -380,15 +583,10 @@ void loop() {
   if (elapsedS >= CONTROL_INTERVAL_S) {
     // Clear accumulated wake count
     wdtWakeCount = 0;
-    // Trigger DHT read / control with retry logic (do not read from ISR)
-    float tempC = readTempWithRetries();
-    if (!isnan(tempC)) {
-      lastValidTempC = tempC;
-      controlTemperature(lastValidTempC, targetTenthsC);
-      // update display with new current temp
-      updateDisplay(lastValidTempC, targetTenthsC);
-    } else {
-      Serial.println("DHT read failed (sleep-wakeup)");
+    // Start a non-blocking DHT read for control if not already active
+    if (!dhtRetryActive && !controlReadPending) {
+      startDhtRetries();
+      controlReadPending = true;
     }
   }
 
