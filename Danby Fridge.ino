@@ -1,5 +1,5 @@
 #include <DHT.h>
-#include <Adafruit_ST77xx.h>
+#include <Adafruit_ST7735.h>
 #include <SPI.h>                 // ESP32 core SPI
 #include <Preferences.h>         // replaces EEPROM.h
 #include "rotary.h"
@@ -72,7 +72,7 @@ static Preferences prefs;
 #define DHT_RETRY_DELAY_MS 200
 
 DHT dht(DHTPIN, DHTTYPE);
-Adafruit_ST77xx tft = Adafruit_ST77xx(160, 80, TFT_CS, TFT_DC, TFT_RST);
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
  // Internal state stored in tenths of °C to avoid non-atomic float access
 volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
@@ -157,7 +157,10 @@ void setup() {
 
   // Initialize display inside an SPI transaction for consistent bus settings
   SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
-  tft.initSPI();
+  // ST7735-specific init for 160x80 modules.
+  // Use the MINI160x80 init table which is designed for the common 160x80 modules.
+  // If your module still requires a different init (BLACKTAB/GREEN/TAB), swap this constant.
+  tft.initR(INITR_MINI160x80);
   tft.setRotation(2);
   tft.fillScreen(ST77XX_BLACK);
   tft.setTextColor(ST77XX_WHITE);
@@ -275,21 +278,10 @@ void updateDisplay(float currentC, int16_t targetTenths) {
 }
 
 static bool startRmtDhtAttempt() {
-  // Configure and start an RMT receive attempt; returns true if started
-  rmt_config_t rmt_rx;
-  rmt_rx.rmt_mode = RMT_MODE_RX;
-  rmt_rx.channel = DHT_RMT_CHANNEL;
-  rmt_rx.gpio_num = (gpio_num_t)DHTPIN;
-  rmt_rx.clk_div = 80; // 1us resolution
-  rmt_rx.mem_block_num = 2;
-  // Use default rx config fields
-  if (rmt_config(&rmt_rx) != ESP_OK) return false;
-  if (rmt_driver_install(rmt_rx.channel, 1000, 0) != ESP_OK) return false;
-
-  // Get ring buffer handle
-  rmt_get_ringbuf_handle(rmt_rx.channel, &dhtRmtRb);
+  // Start an RMT receive attempt using the driver and ringbuffer already initialized in setup().
+  // Returns true if the attempt was successfully initiated.
   if (!dhtRmtRb) {
-    rmt_driver_uninstall(rmt_rx.channel);
+    // RMT driver or ringbuffer not available
     return false;
   }
 
@@ -301,10 +293,15 @@ static bool startRmtDhtAttempt() {
   ets_delay_us(40); // 40 us
   pinMode(DHTPIN, INPUT_PULLUP);
 
-  // Start receiving
-  if (rmt_rx_start(rmt_rx.channel, true) != ESP_OK) {
-    vRingbufferReturnItem(dhtRmtRb, NULL); // ensure clean
-    rmt_driver_uninstall(rmt_rx.channel);
+  // Start receiving on preconfigured channel
+  if (rmt_rx_start(DHT_RMT_CHANNEL, true) != ESP_OK) {
+    // ensure ringbuffer is clean if start failed
+    if (dhtRmtRb) {
+      // drain any available item
+      size_t rx_size = 0;
+      void* item = xRingbufferReceive(dhtRmtRb, &rx_size, 0);
+      if (item) vRingbufferReturnItem(dhtRmtRb, item);
+    }
     return false;
   }
 
@@ -322,11 +319,13 @@ static float pollRmtDhtAttempt() {
   rmt_item32_t* items = (rmt_item32_t*) xRingbufferReceive(dhtRmtRb, &rx_size, 0);
   if (!items) {
     // No data yet. Check timeout (300 ms) to consider attempt failed.
-    if (millis() - dhtRmtStartMs > 300) {
+      if (millis() - dhtRmtStartMs > 300) {
       // timeout: clean up and mark not active
       rmt_rx_stop(DHT_RMT_CHANNEL);
-      vRingbufferReturnItem(dhtRmtRb, NULL);
-      rmt_driver_uninstall(DHT_RMT_CHANNEL);
+      // drain any pending item if present
+      size_t _sz = 0;
+      void* _it = xRingbufferReceive(dhtRmtRb, &_sz, 0);
+      if (_it) vRingbufferReturnItem(dhtRmtRb, _it);
       dhtRmtActive = false;
       return NAN;
     }
@@ -346,9 +345,8 @@ static float pollRmtDhtAttempt() {
   // Return RMT buffer
   vRingbufferReturnItem(dhtRmtRb, (void*)items);
 
-  // Stop and uninstall driver
+  // Stop receiver for this attempt; keep driver installed for subsequent reads
   rmt_rx_stop(DHT_RMT_CHANNEL);
-  rmt_driver_uninstall(DHT_RMT_CHANNEL);
   dhtRmtActive = false;
 
   // Filter relevant highs
