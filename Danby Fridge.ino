@@ -15,21 +15,7 @@
 // Preferences instance for non-volatile storage on ESP32
 static Preferences prefs;
 
-// // === For Arduino Nano ===
-// #define DHTPIN 4
-// #define DHTTYPE DHT22
-// #define RELAY_PIN 5
-// #define ROTARY_CLK 2
-// #define ROTARY_DT 6
-// #define ROTARY_SW 3
-// #define TFT_CS 10
-// #define TFT_RST 9
-// #define TFT_DC 8
-// // #define TFT_MOSI        11   // GPIO4 (fixed MOSI - SDA on TFT)
-// // #define TFT_SCK         13   // GPIO6 (fixed SCK - SCL on TFT)
-// #define BACKLIGHT_PIN 7          // pin to control TFT backlight (default D7)
-
-// === ESP32-C3 Mini Pin Remapping ===
+// === ESP32-C3 Supermini Pin Mapping ===
 #define DHTPIN          0   // GPIO0
 #define RELAY_PIN       1   // GPIO1
 #define ROTARY_CLK      2   // GPIO2
@@ -187,7 +173,7 @@ void setup() {
   lastDHTReadMs = millis();
 
   // Load persisted target temperature (tenths of °C). Validate range, otherwise set to current measured temp if available.
-   prefs.begin("fridge", false);
+  prefs.begin("fridge", false);
 
   // Try to load saved target
   int16_t saved = prefs.getShort("targetC", INT16_MIN);
