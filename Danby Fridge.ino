@@ -30,8 +30,6 @@ static Preferences prefs;
 
 // === Notes ===
 // - All pins are 3.3V only (no 5V tolerance).
-// - If your board exposes GPIO18/19, you can swap them in for less conflict.
-// - Replace EEPROM/LowPower libraries with Preferences + esp_sleep APIs.
 
 #define DISPLAY_UPDATE_INTERVAL 200
 #define DHT_READ_INTERVAL 1000
@@ -43,9 +41,8 @@ static Preferences prefs;
 #define ENCODER_DEBOUNCE_MS 10   // debounce period for encoder (ms)
 #define LONG_PRESS_MS 1000 // ms for long press to toggle units
 
-// EEPROM persistence
-#define EEPROM_ADDR_TARGET 0
-#define SAVE_INTERVAL_MS 5000    // minimum interval between EEPROM writes
+/* Persistence (Preferences) */
+#define SAVE_INTERVAL_MS 5000    // minimum interval between non-volatile writes
 
 // Power management
 #define WDT_SLEEP_S 8            // WDT sleep interval in seconds (LowPower SLEEP_8S)
