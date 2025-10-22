@@ -22,10 +22,11 @@ static Preferences prefs;
 #define ROTARY_SW       10  // GPIO10 (has pull-up, interrupt capable)
 #define TFT_CS          7   // GPIO7
 #define TFT_DC          8   // GPIO8
-#define TFT_RST         9   // GPIO9
-#define TFT_MOSI        4   // GPIO4 (fixed MOSI)
-#define TFT_SCK         6   // GPIO6 (fixed SCK)
-#define BACKLIGHT_PIN   5   // GPIO5 (PWM-capable)
+//#define TFT_RST         9   // GPIO9 (tied HIGH on module; not used by library - constructor will be passed -1)
+#define TFT_MOSI        6   // GPIO6 (board MOSI)
+#define TFT_MISO        5   // GPIO5 (board MISO) -- WARNING: GPIO5 is hardware MISO; avoid using as BACKLIGHT_PIN
+#define TFT_SCK         4   // GPIO4 (board SCK)
+#define BACKLIGHT_PIN   9   // GPIO9 (reused for backlight). Tie the module RST pin to 3.3V (e.g., 10k) since RST is no longer controlled by the MCU.
 
 // === Notes ===
 // - All pins are 3.3V only (no 5V tolerance).
@@ -58,7 +59,7 @@ static Preferences prefs;
 #define DHT_RMT_TIMEOUT_MS 300        // timeout for a single RMT attempt (ms)
 
 DHT dht(DHTPIN, DHTTYPE);
-Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1); // RST tied HIGH on module; pass -1 to disable software reset
 
  // Internal state stored in tenths of °C to avoid non-atomic float access
 volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
@@ -139,7 +140,7 @@ void setup() {
   }
 
   // Initialize SPI with explicit pins for ESP32-C3
-  SPI.begin(TFT_SCK, -1, TFT_MOSI, TFT_CS);
+  SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
 
   // Initialize display inside an SPI transaction for consistent bus settings
   SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
@@ -158,7 +159,7 @@ void setup() {
   pinMode(ROTARY_DT, INPUT_PULLUP);
   pinMode(ROTARY_SW, INPUT_PULLUP);
 
-  // Backlight control pin
+  // Backlight control pin (module BLK has onboard transistor)
   pinMode(BACKLIGHT_PIN, OUTPUT);
   digitalWrite(BACKLIGHT_PIN, HIGH); // turn on display backlight at startup
 
