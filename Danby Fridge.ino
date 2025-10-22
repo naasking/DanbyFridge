@@ -16,7 +16,7 @@
 static Preferences prefs;
 
 // === ESP32-C3 Supermini Pin Mapping ===
-#define DHTPIN          0   // GPIO0
+#define DHTPIN          0   // GPIO0 (not a strapping pin on ESP32-C# supermini board)
 #define RELAY_PIN       1   // GPIO1
 #define ROTARY_CLK      2   // GPIO2
 #define ROTARY_DT       3   // GPIO3
@@ -30,7 +30,6 @@ static Preferences prefs;
 
 // === Notes ===
 // - All pins are 3.3V only (no 5V tolerance).
-// - GPIO0 is strapping: keep it pulled high at boot if used for DHT.
 // - If your board exposes GPIO18/19, you can swap them in for less conflict.
 // - Replace EEPROM/LowPower libraries with Preferences + esp_sleep APIs.
 
@@ -53,9 +52,14 @@ static Preferences prefs;
 #define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
 #define DISPLAY_ON_AFTER_WAKE_MS 3000 // keep display on for some time after wake for user feedback
 #define COMPRESSOR_MIN_OFF_MS (4UL * 60UL * 1000UL) // 4 minutes minimum off time for compressor starter
-// DHT read retry settings
+/* DHT read retry settings and RMT parsing thresholds (tunable) */
 #define DHT_MAX_RETRIES 3
 #define DHT_RETRY_DELAY_MS 200
+
+/* RMT parsing thresholds (microseconds) */
+#define DHT_RMT_HIGH_MIN_US 20        // ignore highs shorter than this
+#define DHT_RMT_ONE_THRESHOLD_US 50   // high-duration >= this -> bit=1
+#define DHT_RMT_TIMEOUT_MS 300        // timeout for a single RMT attempt (ms)
 
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
