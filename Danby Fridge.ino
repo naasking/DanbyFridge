@@ -9,7 +9,6 @@
 #include "soc/rmt_reg.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
-#include <vector>
 
 #define DHTTYPE DHT22
 // Preferences instance for non-volatile storage on ESP32
@@ -321,12 +320,12 @@ static float pollRmtDhtAttempt() {
 
   int item_count = rx_size / sizeof(rmt_item32_t);
 
-  // Collect high durations
-  std::vector<uint32_t> highs;
-  highs.reserve(64);
+  // Collect high durations into a fixed buffer (avoid heap allocations)
+  uint32_t highs[128];
+  int highs_cnt = 0;
   for (int i = 0; i < item_count; ++i) {
-    if (items[i].level0 == 1) highs.push_back(items[i].duration0);
-    if (items[i].level1 == 1) highs.push_back(items[i].duration1);
+    if (items[i].level0 == 1 && highs_cnt < 128) highs[highs_cnt++] = items[i].duration0;
+    if (items[i].level1 == 1 && highs_cnt < 128) highs[highs_cnt++] = items[i].duration1;
   }
 
   // Return RMT buffer
@@ -336,19 +335,22 @@ static float pollRmtDhtAttempt() {
   rmt_rx_stop(DHT_RMT_CHANNEL);
   dhtRmtActive = false;
 
-  // Filter relevant highs
-  std::vector<uint32_t> bitHighs;
-  for (auto d : highs) {
-    if (d > 20) bitHighs.push_back(d);
+  // Filter relevant highs into a fixed buffer
+  uint32_t bitHighs[64];
+  int bitHighs_cnt = 0;
+  for (int i = 0; i < highs_cnt; ++i) {
+    uint32_t d = highs[i];
+    if (d > DHT_RMT_HIGH_MIN_US && bitHighs_cnt < 64) bitHighs[bitHighs_cnt++] = d;
   }
-  if (bitHighs.size() < 40) return NAN;
+  if (bitHighs_cnt < 40) return NAN;
 
-  std::vector<uint8_t> bits;
-  for (size_t i = 0; i < bitHighs.size() && bits.size() < 40; ++i) {
+  uint8_t bits[40];
+  int bits_cnt = 0;
+  for (int i = 0; i < bitHighs_cnt && bits_cnt < 40; ++i) {
     uint32_t dur = bitHighs[i];
-    bits.push_back(dur > 50 ? 1 : 0);
+    bits[bits_cnt++] = (dur > DHT_RMT_ONE_THRESHOLD_US) ? 1 : 0;
   }
-  if (bits.size() < 40) return NAN;
+  if (bits_cnt < 40) return NAN;
 
   uint8_t data[5] = {0};
   for (int i = 0; i < 40; ++i) {
