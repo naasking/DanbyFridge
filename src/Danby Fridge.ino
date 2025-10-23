@@ -15,18 +15,21 @@
 static Preferences prefs;
 
 // === ESP32-C3 Supermini Pin Mapping ===
-#define DHTPIN          0   // GPIO0 (not a strapping pin on ESP32-C# supermini board)
-#define RELAY_PIN       1   // GPIO1
-#define ROTARY_CLK      2   // GPIO2
-#define ROTARY_DT       3   // GPIO3
-#define ROTARY_SW       10  // GPIO10 (has pull-up, interrupt capable)
-#define TFT_CS          7   // GPIO7
-#define TFT_DC          8   // GPIO8
-//#define TFT_RST         9   // GPIO9 (tied HIGH on module; not used by library - constructor will be passed -1)
-#define TFT_MOSI        6   // GPIO6 (board MOSI)
-#define TFT_MISO        5   // GPIO5 (board MISO) -- WARNING: GPIO5 is hardware MISO; avoid using as BACKLIGHT_PIN
-#define TFT_SCK         4   // GPIO4 (board SCK)
-#define BACKLIGHT_PIN   9   // GPIO9 (reused for backlight). Tie the module RST pin to 3.3V (e.g., 10k) since RST is no longer controlled by the MCU.
+#define DHTPIN          21  // Safe
+#define RELAY_PIN       1   // Safe
+
+// Rotary encoder -- grouped on the right side
+#define ROTARY_DT       8   // Strapping: OK for input
+#define ROTARY_CLK      9   // Strapping: OK for input, avoid strong pulls at reset
+#define ROTARY_SW       20  // Strapping: OK for input
+
+// TFT SPI -- grouped on the left side
+#define TFT_DC          0   // Safe
+#define BACKLIGHT_PIN   2   // Safe
+#define TFT_CS          3   // Safe
+#define TFT_MOSI        4   // Safe
+#define TFT_SCK         5   // Safe
+#define TFT_MISO       -1   // Not used
 
 // === Notes ===
 // - All pins are 3.3V only (no 5V tolerance).
@@ -114,6 +117,17 @@ void IRAM_ATTR wakeISR() {
 
 void setup() {
   Serial.begin(115200);
+  delay(3000);
+  Serial.println("Program started...");
+  Serial.println("*** I2C Pins ");
+
+Serial.print("SDA : "); Serial.println(SDA );
+Serial.print("SCL : "); Serial.println(SCL );
+Serial.println(" Rx Tx Pins ***");
+Serial.print("RX : "); Serial.println(RX );
+Serial.print("TX : "); Serial.println(TX );
+
+  // Continue normal initialization
   dht.begin();
 
   // Initialize RMT for DHT non-blocking reads once (driver + ringbuffer)
@@ -144,15 +158,35 @@ void setup() {
 
   // Initialize display inside an SPI transaction for consistent bus settings
   SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  Serial.println("ST7735: init start");
   // ST7735-specific init for 160x80 modules.
   // Use the MINI160x80 init table which is designed for the common 160x80 modules.
   // If your module still requires a different init (BLACKTAB/GREEN/TAB), swap this constant.
   tft.initR(INITR_MINI160x80);
   tft.setRotation(2);
-  tft.fillScreen(ST77XX_BLACK);
+  // Ensure display is explicitly enabled after init (some modules require explicit on)
+  tft.enableDisplay(true);
+  SPI.endTransaction();
+  Serial.println("ST7735: init done - running visual test pattern");
+
+  // Quick visual test pattern to verify drawing commands reach the display
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  tft.fillScreen(ST77XX_RED);    delay(400);
+  tft.fillScreen(ST77XX_GREEN);  delay(400);
+  tft.fillScreen(ST77XX_BLUE);   delay(400);
+  tft.fillScreen(ST77XX_BLACK);  delay(200);
+
+  // Draw gradient bars and text so you can see whether pixels update
+  tft.fillRect(0, 0, 40, 160, ST77XX_WHITE);
+  tft.fillRect(40, 0, 40, 160, ST77XX_RED);
+  tft.fillRect(80, 0, 40, 160, ST77XX_GREEN);
+  tft.fillRect(120, 0, 40, 160, ST77XX_BLUE);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(2);
+  tft.setCursor(6, 60);
+  tft.print("TEST");
   SPI.endTransaction();
+  Serial.println("ST7735: visual test done");
 
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(ROTARY_CLK, INPUT_PULLUP);
@@ -161,7 +195,6 @@ void setup() {
 
   // Backlight control pin (module BLK has onboard transistor)
   pinMode(BACKLIGHT_PIN, OUTPUT);
-  digitalWrite(BACKLIGHT_PIN, HIGH); // turn on display backlight at startup
 
   attachInterrupt(digitalPinToInterrupt(ROTARY_CLK), encoderISR, CHANGE);
   // Wake-only interrupt for rotary pushbutton (FALLING edge). ISR does nothing
@@ -452,6 +485,8 @@ void controlTemperature(float currentC, int16_t targetTenths) {
 }
 
 void loop() {
+  Serial.println("in loop...");
+  delay(500);
   unsigned long now = millis();
 
   // 1) Consume encoder pulses produced by the quadrature ISR and convert pulses -> steps
