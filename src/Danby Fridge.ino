@@ -19,9 +19,9 @@ static Preferences prefs;
 #define RELAY_PIN       1   // Safe
 
 // Rotary encoder -- grouped on the right side
-#define ROTARY_DT       8   // Strapping: OK for input
+#define ROTARY_SW       8   // Strapping: OK for input
 #define ROTARY_CLK      9   // Strapping: OK for input, avoid strong pulls at reset
-#define ROTARY_SW       20  // Strapping: OK for input
+#define ROTARY_DT       20  // Strapping: OK for input
 
 // TFT SPI -- grouped on the left side
 #define TFT_DC          0   // Safe
@@ -120,12 +120,6 @@ void setup() {
   delay(3000);
   Serial.println("Program started...");
   Serial.println("*** I2C Pins ");
-
-Serial.print("SDA : "); Serial.println(SDA );
-Serial.print("SCL : "); Serial.println(SCL );
-Serial.println(" Rx Tx Pins ***");
-Serial.print("RX : "); Serial.println(RX );
-Serial.print("TX : "); Serial.println(TX );
 
   // Continue normal initialization
   dht.begin();
