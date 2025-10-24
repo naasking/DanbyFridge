@@ -39,7 +39,7 @@ static Preferences prefs;
 #define CONTROL_INTERVAL 10000
 #define HYSTERESIS_TENTHS 5      // 0.5°C hysteresis
 #define ENCODER_STEP_TENTHS 1    // 0.1°C per encoder step
-#define ENCODER_PULSES_PER_STEP 4 // quadrature pulses per mechanical detent (tune if needed)
+#define ENCODER_PULSES_PER_STEP 1 // quadrature pulses per mechanical detent (tune if needed)
 #define BUTTON_DEBOUNCE_MS 250
 #define ENCODER_DEBOUNCE_MS 10   // debounce period for encoder (ms)
 #define LONG_PRESS_MS 1000 // ms for long press to toggle units
@@ -60,6 +60,8 @@ static Preferences prefs;
 #define DHT_RMT_HIGH_MIN_US 20        // ignore highs shorter than this
 #define DHT_RMT_ONE_THRESHOLD_US 50   // high-duration >= this -> bit=1
 #define DHT_RMT_TIMEOUT_MS 300        // timeout for a single RMT attempt (ms)
+
+#define println(text) if (Serial && Serial.isConnected()) Serial.println(text)
 
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1); // RST tied HIGH on module; pass -1 to disable software reset
@@ -104,8 +106,8 @@ unsigned long pressStartMs = 0;
 void IRAM_ATTR encoderISR() {
   // Minimal ISR: use rotary_step_s16 to update encoderPulseCount directly.
   // rotary_step_s16 performs the state update and increments/decrements the counter.
-  uint8_t a = digitalRead(ROTARY_CLK); // rota (LSB)
-  uint8_t b = digitalRead(ROTARY_DT);  // rotb (MSB)
+  uint8_t b = digitalRead(ROTARY_CLK); // rota (LSB)
+  uint8_t a = digitalRead(ROTARY_DT);  // rotb (MSB)
   rotary_step_s16(&encoderPulseCount, &rot_state, b, a);
 }
 
@@ -117,9 +119,10 @@ void IRAM_ATTR wakeISR() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);
   delay(3000);
-  Serial.println("Program started...");
-  // Serial.println("*** I2C Pins ");
+  println("Program started...");
+  // println("*** I2C Pins ");
 
   // // Continue normal initialization
   // dht.begin();
@@ -139,10 +142,10 @@ void setup() {
   //       rmt_get_ringbuf_handle(rmt_rx.channel, &dhtRmtRb);
   //       // keep driver installed for subsequent reads; do not uninstall until program end
   //     } else {
-  //       Serial.println("RMT driver install failed");
+  //       println("RMT driver install failed");
   //     }
   //   } else {
-  //     Serial.println("RMT config failed");
+  //     println("RMT config failed");
   //   }
   //   // Note: dhtRmtRb may be NULL if driver/ringbuf not available; startRmtDhtAttempt will check
   // }
@@ -151,7 +154,7 @@ void setup() {
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
 
   // Initialize display and let the Adafruit library manage SPI.
-  Serial.println("ST7735: init start");
+  println("ST7735: init start");
   // Ensure control pins are configured and stable before calling library init.
   pinMode(TFT_CS, OUTPUT);
   digitalWrite(TFT_CS, HIGH);
@@ -160,13 +163,14 @@ void setup() {
   delay(10); // allow peripheral to settle
   // Call library init (use MINI160x80 PLUGIN for this module)
   tft.initR(INITR_MINI160x80_PLUGIN);
-  tft.setRotation(1);
+  tft.setRotation(3);
   tft.enableDisplay(true);
-  Serial.println("ST7735: init done - running visual test pattern");
+  println("ST7735: clear screen");
+  tft.fillScreen(ST7735_BLACK);
 
   // Ensure screen is cleared to black and initial UI drawn
-  updateDisplay(lastValidTempC, targetTenthsC);
-  Serial.println("ST7735: initial UI drawn");
+  //updateDisplay(lastValidTempC, targetTenthsC);
+  //println("ST7735: initial UI drawn");
 
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(ROTARY_CLK, INPUT_PULLUP);
@@ -210,6 +214,7 @@ void setup() {
 
 void updateDisplay(float currentC, int16_t targetTenths) {
   // Full-screen redraw but use color to distinguish current (white) and target (light blue).
+  println("updating display...");
   tft.fillScreen(ST7735_BLACK);
 
   tft.setTextSize(2);
@@ -233,7 +238,7 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   // Target temperature (right) in light blue
   uint16_t lightBlue = tft.color565(173, 216, 230); // light blue (RGB: 173,216,230)
   tft.setTextColor(lightBlue, ST77XX_BLACK);
-  tft.setCursor(96, 18);
+  tft.setCursor(80, 18);
   float tgtC = targetTenths / 10.0;
   if (displayCelsius) {
     tft.print(tgtC, 1);
@@ -244,32 +249,44 @@ void updateDisplay(float currentC, int16_t targetTenths) {
     tft.print(" F");
   }
 
-  // Compressor running indicator (snowflake) between the values
-  // Draw a simple snowflake icon centered at (80, 20)
-  int cx = 80;
-  int cy = 24;
-  if (relayOn) {
-    uint16_t iconColor = lightBlue;
-    // central dot
-    tft.drawPixel(cx, cy, iconColor);
-    // main arms
-    tft.drawLine(cx - 6, cy, cx + 6, cy, iconColor); // horizontal
-    tft.drawLine(cx, cy - 6, cx, cy + 6, iconColor); // vertical
-    // diagonals
-    tft.drawLine(cx - 4, cy - 4, cx + 4, cy + 4, iconColor);
-    tft.drawLine(cx - 4, cy + 4, cx + 4, cy - 4, iconColor);
-    // small branches on arms
-    tft.drawPixel(cx - 6, cy - 1, iconColor);
-    tft.drawPixel(cx - 6, cy + 1, iconColor);
-    tft.drawPixel(cx + 6, cy - 1, iconColor);
-    tft.drawPixel(cx + 6, cy + 1, iconColor);
-    tft.drawPixel(cx - 1, cy - 6, iconColor);
-    tft.drawPixel(cx + 1, cy - 6, iconColor);
-    tft.drawPixel(cx - 1, cy + 6, iconColor);
-    tft.drawPixel(cx + 1, cy + 6, iconColor);
-  } else {
-    // If compressor off, optionally draw a faint outline or nothing. We'll draw nothing.
-  }
+  // {
+  //   long cur = millis();
+  //   static long ms = 0;
+  //   if (cur - ms > 2000)
+  //   {
+      println("Printing time counter...");
+      tft.setCursor(50, 50);
+      tft.print(millis());
+  //    ms = cur;
+  //   }
+  // }
+
+  // // Compressor running indicator (snowflake) between the values
+  // // Draw a simple snowflake icon centered at (80, 20)
+  // int cx = 80;
+  // int cy = 24;
+  // if (relayOn) {
+  //   uint16_t iconColor = lightBlue;
+  //   // central dot
+  //   tft.drawPixel(cx, cy, iconColor);
+  //   // main arms
+  //   tft.drawLine(cx - 6, cy, cx + 6, cy, iconColor); // horizontal
+  //   tft.drawLine(cx, cy - 6, cx, cy + 6, iconColor); // vertical
+  //   // diagonals
+  //   tft.drawLine(cx - 4, cy - 4, cx + 4, cy + 4, iconColor);
+  //   tft.drawLine(cx - 4, cy + 4, cx + 4, cy - 4, iconColor);
+  //   // small branches on arms
+  //   tft.drawPixel(cx - 6, cy - 1, iconColor);
+  //   tft.drawPixel(cx - 6, cy + 1, iconColor);
+  //   tft.drawPixel(cx + 6, cy - 1, iconColor);
+  //   tft.drawPixel(cx + 6, cy + 1, iconColor);
+  //   tft.drawPixel(cx - 1, cy - 6, iconColor);
+  //   tft.drawPixel(cx + 1, cy - 6, iconColor);
+  //   tft.drawPixel(cx - 1, cy + 6, iconColor);
+  //   tft.drawPixel(cx + 1, cy + 6, iconColor);
+  // } else {
+  //   // If compressor off, optionally draw a faint outline or nothing. We'll draw nothing.
+  // }
 
 }
 
@@ -461,8 +478,8 @@ void controlTemperature(float currentC, int16_t targetTenths) {
 }
 
 void loop() {
-  Serial.println("in loop...");
-  delay(500);
+  //println("in loop...");
+  //delay(500);
   unsigned long now = millis();
 
   // 1) Consume encoder pulses produced by the quadrature ISR and convert pulses -> steps
@@ -474,12 +491,13 @@ void loop() {
     interrupts();
 
     if (pulses != 0) {
+      println("Detected pulses");
       static int16_t remainder = 0;
       remainder += pulses;
       int16_t steps = remainder / ENCODER_PULSES_PER_STEP;
       remainder = remainder % ENCODER_PULSES_PER_STEP;
 
-        if (steps != 0) {
+      if (steps != 0) {
         int16_t newTarget = targetTenthsC + (int16_t)(steps * ENCODER_STEP_TENTHS);
         if (newTarget < -400) newTarget = -400;
         if (newTarget > 500)  newTarget = 500;
@@ -494,34 +512,35 @@ void loop() {
   }
 
   // Persist target temperature occasionally (rate-limited to SAVE_INTERVAL_MS)
-  if (targetDirty && (millis() - lastSaveMs >= SAVE_INTERVAL_MS)) {
+  if (targetDirty && (now - lastSaveMs >= SAVE_INTERVAL_MS)) {
     int16_t toSave = targetTenthsC; // local copy
+    println("Save target C");
     // Preferences is already opened in setup and kept open; just write the value
     prefs.putShort("targetC", toSave);
-    lastSaveMs = millis();
+    lastSaveMs = now;
     targetDirty = false;
   }
   
-  // Keep display on for a short period after any updates for user feedback
-  if (millis() < displayOnUntilMs) {
-    digitalWrite(BACKLIGHT_PIN, HIGH);
-  } else {
-    digitalWrite(BACKLIGHT_PIN, LOW);
-  }
+  // // Keep display on for a short period after any updates for user feedback
+  // if (now < displayOnUntilMs) {
+  //   digitalWrite(BACKLIGHT_PIN, HIGH);
+  // } else {
+  //   digitalWrite(BACKLIGHT_PIN, LOW);
+  // }
   
-  //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and timer (approx WDT)
-  //  Only sleep if no recent activity and display not required.
-  bool idle = (encoderPulseCount == 0) && !targetDirty;
-  if (idle) {
-    // Configure timer wake for approximately WDT_SLEEP_S seconds (esp_light_sleep)
-    esp_sleep_enable_timer_wakeup((uint64_t)WDT_SLEEP_S * 1000000ULL);
-    // Enter light sleep; external interrupts attached with attachInterrupt() will also wake the chip
-    esp_light_sleep_start();
-    // Woke up (either via timer or external INT)
-    wdtWakeCount++;
-    // keep display on briefly after wake for feedback
-    displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
-  }
+  // //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and timer (approx WDT)
+  // //  Only sleep if no recent activity and display not required.
+  // bool idle = (encoderPulseCount == 0) && !targetDirty;
+  // if (idle) {
+  //   // Configure timer wake for approximately WDT_SLEEP_S seconds (esp_light_sleep)
+  //   esp_sleep_enable_timer_wakeup((uint64_t)WDT_SLEEP_S * 1000000ULL);
+  //   // Enter light sleep; external interrupts attached with attachInterrupt() will also wake the chip
+  //   esp_light_sleep_start();
+  //   // Woke up (either via timer or external INT)
+  //   wdtWakeCount++;
+  //   // keep display on briefly after wake for feedback
+  //   displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
+  // }
 
   // (quadrature ISR handles bounce; no encoder lock needed)
 
@@ -530,6 +549,7 @@ void loop() {
 
   if (sw == LOW && lastButtonState == HIGH && (now - lastButtonMs) > BUTTON_DEBOUNCE_MS) {
     // Button pressed (debounced start)
+    println("Detected button edge");
     pressStartMs = now;
     lastButtonMs = now;
   }
@@ -538,6 +558,7 @@ void loop() {
     // Button released, check duration
     unsigned long pressDuration = now - pressStartMs;
     if (pressDuration >= LONG_PRESS_MS) {
+      println("Detected button press");
       displayCelsius = !displayCelsius;
       updateDisplay(lastValidTempC, targetTenthsC);
     }
@@ -546,47 +567,54 @@ void loop() {
 
   lastButtonState = sw;
 
-  // 3) Start non-blocking DHT read sequence when interval reached, and poll progress
-  if (now - lastDHTReadMs >= DHT_READ_INTERVAL) {
-    startDhtRetries();
-    lastDHTReadMs = now;
-  }
+  // // 3) Start non-blocking DHT read sequence when interval reached, and poll progress
+  // if (now - lastDHTReadMs >= DHT_READ_INTERVAL) {
+  //   startDhtRetries();
+  //   lastDHTReadMs = now;
+  // }
 
-  // Poll any in-progress non-blocking DHT attempt (RMT); handle initial/control outcomes
+  // // Poll any in-progress non-blocking DHT attempt (RMT); handle initial/control outcomes
+  // {
+  //   float dhtTemp;
+  //   if (dhtRetryActive) {
+  //     if (pollDhtRetries(&dhtTemp)) {
+  //       if (!isnan(dhtTemp)) {
+  //         lastValidTempC = dhtTemp;
+  //         if (controlReadPending) {
+  //           controlReadPending = false;
+  //           controlTemperature(lastValidTempC, targetTenthsC);
+  //           updateDisplay(lastValidTempC, targetTenthsC);
+  //         }
+  //       } else {
+  //         println("DHT read failed (retries)");
+  //         // clear pending flags on failure
+  //         controlReadPending = false;
+  //       }
+  //     }
+  //   }
+  // }
+
+
+  // // 5) Control relay periodically using WDT wake count approximation
+  // // WDT interval roughly WDT_SLEEP_S seconds per LowPower wake.
+  // // Add elapsed seconds since last WDT wake (approx)
+  // // Use wdtWakeCount as a coarse timer: multiply by WDT_SLEEP_S
+  // unsigned long elapsedS = wdtWakeCount * WDT_SLEEP_S;
+  // if (elapsedS >= CONTROL_INTERVAL_S) {
+  //   // Clear accumulated wake count
+  //   wdtWakeCount = 0;
+  //   // Start a non-blocking DHT read for control if not already active
+  //   if (!dhtRetryActive && !controlReadPending) {
+  //     startDhtRetries();
+  //     controlReadPending = true;
+  //   }
+  // }
+
   {
-    float dhtTemp;
-    if (dhtRetryActive) {
-      if (pollDhtRetries(&dhtTemp)) {
-        if (!isnan(dhtTemp)) {
-          lastValidTempC = dhtTemp;
-          if (controlReadPending) {
-            controlReadPending = false;
-            controlTemperature(lastValidTempC, targetTenthsC);
-            updateDisplay(lastValidTempC, targetTenthsC);
-          }
-        } else {
-          Serial.println("DHT read failed (retries)");
-          // clear pending flags on failure
-          controlReadPending = false;
-        }
-      }
+    static unsigned long ms = 0;
+    if (now - ms > 2000) {
+      updateDisplay(lastValidTempC, targetTenthsC);
+      ms = now;
     }
   }
-
-
-  // 5) Control relay periodically using WDT wake count approximation
-  // WDT interval roughly WDT_SLEEP_S seconds per LowPower wake.
-  // Add elapsed seconds since last WDT wake (approx)
-  // Use wdtWakeCount as a coarse timer: multiply by WDT_SLEEP_S
-  unsigned long elapsedS = wdtWakeCount * WDT_SLEEP_S;
-  if (elapsedS >= CONTROL_INTERVAL_S) {
-    // Clear accumulated wake count
-    wdtWakeCount = 0;
-    // Start a non-blocking DHT read for control if not already active
-    if (!dhtRetryActive && !controlReadPending) {
-      startDhtRetries();
-      controlReadPending = true;
-    }
-  }
-
 }
