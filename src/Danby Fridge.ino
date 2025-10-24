@@ -158,28 +158,15 @@ void setup() {
   pinMode(TFT_DC, OUTPUT);
   digitalWrite(TFT_DC, HIGH);
   delay(10); // allow peripheral to settle
-  // Call library init (use MINI160x80 for this module)
-  tft.initR(INITR_MINI160x80);
+  // Call library init (use MINI160x80 PLUGIN for this module)
+  tft.initR(INITR_MINI160x80_PLUGIN);
   tft.setRotation(1);
   tft.enableDisplay(true);
   Serial.println("ST7735: init done - running visual test pattern");
 
-  // Quick visual test pattern to verify drawing commands reach the display
-  tft.fillScreen(ST77XX_RED);    delay(400);
-  tft.fillScreen(ST77XX_GREEN);  delay(400);
-  tft.fillScreen(ST77XX_BLUE);   delay(400);
-  tft.fillScreen(ST77XX_BLACK);  delay(200);
-
-  // Draw gradient bars and text so you can see whether pixels update
-  tft.fillRect(0, 0, 40, 160, ST77XX_WHITE);
-  tft.fillRect(40, 0, 40, 160, ST77XX_RED);
-  tft.fillRect(80, 0, 40, 160, ST77XX_GREEN);
-  tft.fillRect(120, 0, 40, 160, ST77XX_BLUE);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(6, 60);
-  tft.print("TEST");
-  Serial.println("ST7735: visual test done");
+  // Ensure screen is cleared to black and initial UI drawn
+  updateDisplay(lastValidTempC, targetTenthsC);
+  Serial.println("ST7735: initial UI drawn");
 
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(ROTARY_CLK, INPUT_PULLUP);
@@ -222,10 +209,8 @@ void setup() {
 }
 
 void updateDisplay(float currentC, int16_t targetTenths) {
-  // Wrap display operations in an SPI transaction to ensure the bus runs at the desired speed
-
   // Full-screen redraw but use color to distinguish current (white) and target (light blue).
-  tft.fillScreen(ST77XX_BLACK);
+  tft.fillScreen(ST7735_BLACK);
 
   tft.setTextSize(2);
 
