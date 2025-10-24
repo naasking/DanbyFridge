@@ -14,21 +14,21 @@
 // Preferences instance for non-volatile storage on ESP32
 static Preferences prefs;
 
-// === ESP32-C3 Supermini Pin Mapping ===
+// === ESP32-C3 Super mini Pin Mapping ===
 #define DHTPIN          21  // Safe
-#define RELAY_PIN       1   // Safe
+#define RELAY_PIN       1   // Safe -- connected to HW-040 relay module
 
 // Rotary encoder -- grouped on the right side
-#define ROTARY_SW       8   // Strapping: OK for input
-#define ROTARY_CLK      9   // Strapping: OK for input, avoid strong pulls at reset
+#define ROTARY_SW       9   // Strapping: OK for input, button held down at reset boots into serial bootloader
+#define ROTARY_CLK      8   // Strapping: OK for input, avoid strong pulls at reset
 #define ROTARY_DT       20  // Strapping: OK for input
 
 // TFT SPI -- grouped on the left side
 #define TFT_DC          0   // Safe
-#define BACKLIGHT_PIN   2   // Safe
+#define BACKLIGHT_PIN   2   // Strapping: defaults LOW, safe for output after boot
 #define TFT_CS          3   // Safe
-#define TFT_MOSI        4   // Safe
-#define TFT_SCK         5   // Safe
+#define TFT_MOSI        4   // Safe (SDA on TFT7735)
+#define TFT_SCK         5   // Safe (SCL on TFT7735)
 #define TFT_MISO       -1   // Not used
 
 // === Notes ===
@@ -119,52 +119,52 @@ void setup() {
   Serial.begin(115200);
   delay(3000);
   Serial.println("Program started...");
-  Serial.println("*** I2C Pins ");
+  // Serial.println("*** I2C Pins ");
 
-  // Continue normal initialization
-  dht.begin();
+  // // Continue normal initialization
+  // dht.begin();
 
-  // Initialize RMT for DHT non-blocking reads once (driver + ringbuffer)
-  {
-    rmt_config_t rmt_rx;
-    rmt_rx.rmt_mode = RMT_MODE_RX;
-    rmt_rx.channel = DHT_RMT_CHANNEL;
-    rmt_rx.gpio_num = (gpio_num_t)DHTPIN;
-    rmt_rx.clk_div = 80; // 1us resolution
-    rmt_rx.mem_block_num = 2;
-    // Apply config and install driver once
-    if (rmt_config(&rmt_rx) == ESP_OK) {
-      if (rmt_driver_install(rmt_rx.channel, 1000, 0) == ESP_OK) {
-        // obtain ringbuffer handle (used by pollRmtDhtAttempt)
-        rmt_get_ringbuf_handle(rmt_rx.channel, &dhtRmtRb);
-        // keep driver installed for subsequent reads; do not uninstall until program end
-      } else {
-        Serial.println("RMT driver install failed");
-      }
-    } else {
-      Serial.println("RMT config failed");
-    }
-    // Note: dhtRmtRb may be NULL if driver/ringbuf not available; startRmtDhtAttempt will check
-  }
+  // // Initialize RMT for DHT non-blocking reads once (driver + ringbuffer)
+  // {
+  //   rmt_config_t rmt_rx;
+  //   rmt_rx.rmt_mode = RMT_MODE_RX;
+  //   rmt_rx.channel = DHT_RMT_CHANNEL;
+  //   rmt_rx.gpio_num = (gpio_num_t)DHTPIN;
+  //   rmt_rx.clk_div = 80; // 1us resolution
+  //   rmt_rx.mem_block_num = 2;
+  //   // Apply config and install driver once
+  //   if (rmt_config(&rmt_rx) == ESP_OK) {
+  //     if (rmt_driver_install(rmt_rx.channel, 1000, 0) == ESP_OK) {
+  //       // obtain ringbuffer handle (used by pollRmtDhtAttempt)
+  //       rmt_get_ringbuf_handle(rmt_rx.channel, &dhtRmtRb);
+  //       // keep driver installed for subsequent reads; do not uninstall until program end
+  //     } else {
+  //       Serial.println("RMT driver install failed");
+  //     }
+  //   } else {
+  //     Serial.println("RMT config failed");
+  //   }
+  //   // Note: dhtRmtRb may be NULL if driver/ringbuf not available; startRmtDhtAttempt will check
+  // }
 
   // Initialize SPI with explicit pins for ESP32-C3
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
 
-  // Initialize display inside an SPI transaction for consistent bus settings
-  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  // Initialize display and let the Adafruit library manage SPI.
   Serial.println("ST7735: init start");
-  // ST7735-specific init for 160x80 modules.
-  // Use the MINI160x80 init table which is designed for the common 160x80 modules.
-  // If your module still requires a different init (BLACKTAB/GREEN/TAB), swap this constant.
+  // Ensure control pins are configured and stable before calling library init.
+  pinMode(TFT_CS, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
+  pinMode(TFT_DC, OUTPUT);
+  digitalWrite(TFT_DC, HIGH);
+  delay(10); // allow peripheral to settle
+  // Call library init (use MINI160x80 for this module)
   tft.initR(INITR_MINI160x80);
-  tft.setRotation(2);
-  // Ensure display is explicitly enabled after init (some modules require explicit on)
+  tft.setRotation(1);
   tft.enableDisplay(true);
-  SPI.endTransaction();
   Serial.println("ST7735: init done - running visual test pattern");
 
   // Quick visual test pattern to verify drawing commands reach the display
-  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
   tft.fillScreen(ST77XX_RED);    delay(400);
   tft.fillScreen(ST77XX_GREEN);  delay(400);
   tft.fillScreen(ST77XX_BLUE);   delay(400);
@@ -179,7 +179,6 @@ void setup() {
   tft.setTextSize(2);
   tft.setCursor(6, 60);
   tft.print("TEST");
-  SPI.endTransaction();
   Serial.println("ST7735: visual test done");
 
   pinMode(RELAY_PIN, OUTPUT);
@@ -224,7 +223,6 @@ void setup() {
 
 void updateDisplay(float currentC, int16_t targetTenths) {
   // Wrap display operations in an SPI transaction to ensure the bus runs at the desired speed
-  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
 
   // Full-screen redraw but use color to distinguish current (white) and target (light blue).
   tft.fillScreen(ST77XX_BLACK);
@@ -232,7 +230,7 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   tft.setTextSize(2);
 
   // Current temperature (left)
-  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
   tft.setCursor(8, 18);
   if (isnan(currentC)) {
     tft.print("Err");
@@ -249,7 +247,7 @@ void updateDisplay(float currentC, int16_t targetTenths) {
 
   // Target temperature (right) in light blue
   uint16_t lightBlue = tft.color565(173, 216, 230); // light blue (RGB: 173,216,230)
-  tft.setTextColor(lightBlue);
+  tft.setTextColor(lightBlue, ST77XX_BLACK);
   tft.setCursor(96, 18);
   float tgtC = targetTenths / 10.0;
   if (displayCelsius) {
@@ -288,7 +286,6 @@ void updateDisplay(float currentC, int16_t targetTenths) {
     // If compressor off, optionally draw a faint outline or nothing. We'll draw nothing.
   }
 
-  SPI.endTransaction();
 }
 
 static bool startRmtDhtAttempt() {
