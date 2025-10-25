@@ -18,7 +18,7 @@ static Preferences prefs;
 
 // === ESP32-C3 Super mini Pin Mapping ===
 #define DHTPIN          21  // Safe
-#define RELAY_PIN       1   // Safe -- connected to HW-040 relay module
+#define RELAY_PIN       2   // Safe -- connected to HW-040 relay module
 
 // Rotary encoder -- grouped on the right side
 #define ROTARY_SW       9  // Strapping: rotary encoder button press at start boots into download mode
@@ -27,7 +27,7 @@ static Preferences prefs;
 
 // TFT SPI -- grouped on the left side
 #define TFT_DC          0   // Safe
-#define BACKLIGHT_PIN   2   // Strapping: defaults HIGH
+#define BACKLIGHT_PIN   1   // Strapping: defaults HIGH
 #define TFT_CS          3   // Safe
 #define TFT_MOSI        4   // Safe (SDA on TFT7735)
 #define TFT_SCK         5   // Safe (SCL on TFT7735)
@@ -42,8 +42,7 @@ static Preferences prefs;
 #define HYSTERESIS_TENTHS 5      // 0.5°C hysteresis
 #define ENCODER_STEP_TENTHS 1    // 0.1°C per encoder step
 #define ENCODER_PULSES_PER_STEP 1 // quadrature pulses per mechanical detent (tune if needed)
-#define BUTTON_DEBOUNCE_MS 250
-#define ENCODER_DEBOUNCE_MS 10   // debounce period for encoder (ms)
+#define BUTTON_DEBOUNCE_MS 50
 #define LONG_PRESS_MS 1000 // ms for long press to toggle units
 
 /* Persistence (Preferences) */
@@ -105,7 +104,7 @@ bool lastButtonState = HIGH;
 unsigned long lastButtonMs = 0;
 unsigned long pressStartMs = 0;
 
-// text bounds
+// fixed width text bounds
 uint16_t textWidth, textHeight;
 
 void IRAM_ATTR encoderISR() {
@@ -128,7 +127,6 @@ void setup() {
   Serial.setTxTimeoutMs(0);
   delay(3000);
   println("Program started...");
-  // println("*** I2C Pins ");
 
   // // Continue normal initialization
   // dht.begin();
@@ -159,8 +157,6 @@ void setup() {
   // Initialize SPI with explicit pins for ESP32-C3
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
 
-  // Initialize display and let the Adafruit library manage SPI.
-  println("ST7735: init start");
   // Ensure control pins are configured and stable before calling library init.
   pinMode(TFT_CS, OUTPUT);
   pinMode(TFT_DC, OUTPUT);
@@ -185,12 +181,7 @@ void setup() {
   tft.setTextSize(1);
   tft.setRotation(0);
   tft.enableDisplay(true);
-  //println("ST7735: clear screen");
   tft.fillScreen(ST7735_BLACK);
-
-  // Ensure screen is cleared to black and initial UI drawn
-  //updateDisplay(lastValidTempC, targetTenthsC);
-  //println("ST7735: initial UI drawn");
 
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(ROTARY_CLK, INPUT_PULLUP);
@@ -220,13 +211,10 @@ void setup() {
 
   // Try to load saved target
   int16_t saved = prefs.getShort("targetC", INT16_MIN);
-  if (saved >= -400 && saved <= 500) {
-    // Valid persisted value
-    targetTenthsC = saved;
-  } else {
-    // No valid saved value: use default target (25.0 °C)
-    targetTenthsC = 250;
-  }
+  targetTenthsC = saved >= -400 && saved <= 500
+    ? saved
+    : 250;  // default 25.0C
+
   // keep Preferences open for the lifetime of the program (do not end here)
   // prefs.end(); // removed to keep prefs active
 
@@ -241,8 +229,6 @@ void show(float temp, int16_t x, int16_t y, uint16_t color) {
   // bounds calculation is slightly off
   tft.setTextColor(color);
   tft.fillRect(x, y - textHeight, textWidth + 20, textHeight + 1, ST77XX_BLACK);
-  // tft.fillRect(x, y - textHeight, textWidth + 20, textHeight + 1, ST77XX_RED);
-  // tft.fillRect(x, y - textHeight + 1, textWidth + 18, textHeight - 1, ST77XX_BLACK);
   if (isnan(temp)) {
     // pad "Err" to match numeric+unit width ("%5.1f C" -> 7 chars)
     tft.setCursor(x, y);
@@ -268,21 +254,14 @@ void show(float temp, int16_t x, int16_t y, uint16_t color) {
 void updateDisplay(float currentC, int16_t targetTenths) {
   // Full-screen redraw but use color to distinguish current (white) and target (light blue).
   //println("updating display...");
-  // Filling the screen causes flicker, use the setTextColor overload that accepts
-  // a background colour already paints the background thus overwriting the space
-  //tft.fillScreen(ST7735_BLACK);
 
   // Target temperature (right) in light blue - also fixed-width
   uint16_t lightBlue = tft.color565(120, 120, 255); // light blue (RGB: 120,120,255)
-  //tft.setTextColor(lightBlue, ST77XX_BLACK);
-  //tft.setCursor();
   float tgtC = targetTenths / 10.0;
   show(tgtC, 0, 50, lightBlue);
 
   // Current temperature (left) - print fixed-width numeric + unit to avoid residual chars
-  //tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
   show(currentC, 0, 140, ST77XX_WHITE);
-
 
   // // Compressor running indicator (snowflake) between the values
   // // Draw a simple snowflake icon centered at (80, 20)
@@ -501,8 +480,6 @@ void controlTemperature(float currentC, int16_t targetTenths) {
 }
 
 void loop() {
-  //println("in loop...");
-  //delay(500);
   bool targetDirty = false;
   bool displayDirty = false;
   unsigned long now = millis();
@@ -516,7 +493,6 @@ void loop() {
     interrupts();
 
     if (pulses != 0) {
-      //println("Detected pulses");
       static int16_t remainder = 0;
       remainder += pulses;
       int16_t steps = remainder / ENCODER_PULSES_PER_STEP;
@@ -528,7 +504,7 @@ void loop() {
         if (newTarget > 500)  newTarget = 500;
         if (newTarget != targetTenthsC) {
           targetTenthsC = newTarget;
-          targetDirty = true; // mark for persistence
+          targetDirty = true;
           displayDirty = true;
         }
       }
@@ -543,14 +519,40 @@ void loop() {
     prefs.putShort("targetC", toSave);
     lastSaveMs = now;
   }
+
+  // button press to wake board from sleep and turn on screen
+  // long-press to switch temperature units
+  bool sw = digitalRead(ROTARY_SW);
+  if (sw == LOW) {
+    if (lastButtonState == HIGH && (now - lastButtonMs) > BUTTON_DEBOUNCE_MS) {
+      // Debounced button press
+      pressStartMs = now;
+      lastButtonMs = now;
+      displayDirty = true;
+    }
+    if ((now - pressStartMs) >= LONG_PRESS_MS) {
+      // Long press: toggle units
+      displayCelsius = !displayCelsius;
+      pressStartMs = now; // reset the hold period
+      displayDirty = true;
+    }
+  }
+  if (sw == HIGH && lastButtonState == LOW && (now - lastButtonMs) > BUTTON_DEBOUNCE_MS) {
+    // Button released
+    lastButtonMs = now;
+  }
+  lastButtonState = sw;
   
   // Keep display on for a short period after any updates for user feedback
-  digitalWrite(BACKLIGHT_PIN, (displayOnUntilMs - now < DISPLAY_ON_AFTER_WAKE_MS) ? HIGH : LOW);
+  bool displayOn = displayOnUntilMs - now < DISPLAY_ON_AFTER_WAKE_MS;
+  digitalWrite(BACKLIGHT_PIN, displayOn ? HIGH : LOW);
   
   //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and timer (approx WDT)
   //  Only sleep if no recent activity and display not required.
-  bool idle = (pulses == 0) && !targetDirty;
-  if (idle) {
+  bool idle = (pulses == 0) && !targetDirty && !displayDirty;
+  if (!idle) {
+    displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
+  } else if (!displayOn) {
     // // Configure timer wake for approximately WDT_SLEEP_S seconds (esp_light_sleep)
     // esp_sleep_enable_timer_wakeup((uint64_t)WDT_SLEEP_S * 1000000ULL);
     // // Enter light sleep; external interrupts attached with attachInterrupt() will also wake the chip
@@ -559,31 +561,7 @@ void loop() {
     // wdtWakeCount++;
     // keep display on briefly after wake for feedback
     // displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
-  } else {
-    displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
   }
-
-  // Button handled and debounced in loop (no millis() in ISR)
-  bool sw = digitalRead(ROTARY_SW);
-  if (sw == LOW && lastButtonState == HIGH && (now - lastButtonMs) > BUTTON_DEBOUNCE_MS) {
-    // Button pressed (debounced start)
-    println("Detected button edge");
-    pressStartMs = now;
-    lastButtonMs = now;
-  }
-
-  if (sw == HIGH && lastButtonState == LOW) {
-    // Button released, check duration
-    unsigned long pressDuration = now - pressStartMs;
-    if (pressDuration >= LONG_PRESS_MS) {
-      println("Detected button press");
-      displayCelsius = !displayCelsius;
-      // mark the display dirty; actual redraw happens once at end of loop()
-      displayDirty = true;
-    }
-    lastButtonMs = now;
-  }
-  lastButtonState = sw;
 
   // // 3) Start non-blocking DHT read sequence when interval reached, and poll progress
   // if (now - lastDHTReadMs >= DHT_READ_INTERVAL) {
