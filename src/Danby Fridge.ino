@@ -263,33 +263,38 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   // Current temperature (left) - print fixed-width numeric + unit to avoid residual chars
   show(currentC, 0, 140, ST77XX_WHITE);
 
-  // // Compressor running indicator (snowflake) between the values
-  // // Draw a simple snowflake icon centered at (80, 20)
-  // int cx = 80;
-  // int cy = 24;
-  // if (relayOn) {
-  //   uint16_t iconColor = lightBlue;
-  //   // central dot
-  //   tft.drawPixel(cx, cy, iconColor);
-  //   // main arms
-  //   tft.drawLine(cx - 6, cy, cx + 6, cy, iconColor); // horizontal
-  //   tft.drawLine(cx, cy - 6, cx, cy + 6, iconColor); // vertical
-  //   // diagonals
-  //   tft.drawLine(cx - 4, cy - 4, cx + 4, cy + 4, iconColor);
-  //   tft.drawLine(cx - 4, cy + 4, cx + 4, cy - 4, iconColor);
-  //   // small branches on arms
-  //   tft.drawPixel(cx - 6, cy - 1, iconColor);
-  //   tft.drawPixel(cx - 6, cy + 1, iconColor);
-  //   tft.drawPixel(cx + 6, cy - 1, iconColor);
-  //   tft.drawPixel(cx + 6, cy + 1, iconColor);
-  //   tft.drawPixel(cx - 1, cy - 6, iconColor);
-  //   tft.drawPixel(cx + 1, cy - 6, iconColor);
-  //   tft.drawPixel(cx - 1, cy + 6, iconColor);
-  //   tft.drawPixel(cx + 1, cy + 6, iconColor);
-  // } else {
-  //   // If compressor off, optionally draw a faint outline or nothing. We'll draw nothing.
-  // }
+  // Compressor running indicator (snowflake) between the values
+  // Draw a simple snowflake icon centered at (80, 20)
+  int cx = 40, cy = 80, size = 10;
+  if (relayOn) {
+    uint16_t color = lightBlue;
+    tft.drawPixel(cx, cy, color);
 
+    // main arms (horizontal & vertical)
+    tft.drawLine(cx - size, cy, cx + size, cy, color); // horizontal
+    tft.drawLine(cx, cy - size, cx, cy + size, color); // vertical
+
+    // diagonals (scaled to ~70% of size for aesthetics)
+    int diag = size * 0.7;
+    tft.drawLine(cx - diag, cy - diag, cx + diag, cy + diag, color);
+    tft.drawLine(cx - diag, cy + diag, cx + diag, cy - diag, color);
+
+    // small branches: one pixel offset perpendicular to each arm end
+    // Horizontal arms
+    int bsize = size / 3;
+    tft.drawPixel(cx - size, cy - bsize, color);
+    tft.drawPixel(cx - size, cy + bsize, color);
+    tft.drawPixel(cx + size, cy - bsize, color);
+    tft.drawPixel(cx + size, cy + bsize, color);
+
+    // Vertical arms
+    tft.drawPixel(cx - bsize, cy - size, color);
+    tft.drawPixel(cx + bsize, cy - size, color);
+    tft.drawPixel(cx - bsize, cy + size, color);
+    tft.drawPixel(cx + bsize, cy + size, color);
+  } else {
+    // If compressor off, optionally draw a faint outline or nothing. We'll draw nothing.
+  }
 }
 
 static bool startRmtDhtAttempt() {
