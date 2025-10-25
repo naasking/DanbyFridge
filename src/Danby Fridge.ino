@@ -200,6 +200,7 @@ void setup() {
   // Backlight control pin (module BLK has onboard transistor)
   pinMode(BACKLIGHT_PIN, OUTPUT);
   digitalWrite(BACKLIGHT_PIN, HIGH);
+  displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
 
   attachInterrupt(digitalPinToInterrupt(ROTARY_CLK), encoderISR, CHANGE);
   // Also attach to DT so the ISR runs on changes of either channel (better capture on fast/cheap encoders)
@@ -260,7 +261,7 @@ void show(float temp, int16_t x, int16_t y, uint16_t color) {
     tft.getTextBounds(buf, x, y, &x1, &y1, &w, &h);
     tft.setCursor(78 - w, y);
     tft.print(buf);
-    tft.drawCircle(x + textWidth - 4, y - textHeight / 2 + 8, 2, color);
+    tft.drawCircle(x + textWidth - 4, y - textHeight / 2 + 6, 2, color);
   }
 }
 
@@ -541,29 +542,26 @@ void loop() {
     // Preferences is already opened in setup and kept open; just write the value
     prefs.putShort("targetC", toSave);
     lastSaveMs = now;
-    targetDirty = false;
   }
   
-  // // Keep display on for a short period after any updates for user feedback
-  // if (now - displayOnUntilMs < DISPLAY_ON_AFTER_WAKE_MS) {
-  //   digitalWrite(BACKLIGHT_PIN, HIGH);
-  // } else {
-  //   digitalWrite(BACKLIGHT_PIN, LOW);
-  // }
+  // Keep display on for a short period after any updates for user feedback
+  digitalWrite(BACKLIGHT_PIN, (displayOnUntilMs - now < DISPLAY_ON_AFTER_WAKE_MS) ? HIGH : LOW);
   
-  // //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and timer (approx WDT)
-  // //  Only sleep if no recent activity and display not required.
-  // bool idle = (pulses == 0) && !targetDirty;
-  // if (idle) {
-  //   // Configure timer wake for approximately WDT_SLEEP_S seconds (esp_light_sleep)
-  //   esp_sleep_enable_timer_wakeup((uint64_t)WDT_SLEEP_S * 1000000ULL);
-  //   // Enter light sleep; external interrupts attached with attachInterrupt() will also wake the chip
-  //   esp_light_sleep_start();
-  //   // Woke up (either via timer or external INT)
-  //   wdtWakeCount++;
-  //   // keep display on briefly after wake for feedback
-  //   displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
-  // }
+  //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and timer (approx WDT)
+  //  Only sleep if no recent activity and display not required.
+  bool idle = (pulses == 0) && !targetDirty;
+  if (idle) {
+    // // Configure timer wake for approximately WDT_SLEEP_S seconds (esp_light_sleep)
+    // esp_sleep_enable_timer_wakeup((uint64_t)WDT_SLEEP_S * 1000000ULL);
+    // // Enter light sleep; external interrupts attached with attachInterrupt() will also wake the chip
+    // esp_light_sleep_start();
+    // Woke up (either via timer or external INT)
+    // wdtWakeCount++;
+    // keep display on briefly after wake for feedback
+    // displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
+  } else {
+    displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
+  }
 
   // Button handled and debounced in loop (no millis() in ISR)
   bool sw = digitalRead(ROTARY_SW);
@@ -633,6 +631,5 @@ void loop() {
   // Single display update point: update once per loop if any condition requested it.
   if (displayDirty) {
     updateDisplay(lastValidTempC, targetTenthsC);
-    displayDirty = false;
   }
 }
