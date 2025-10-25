@@ -1,5 +1,6 @@
 #include <DHT.h>
 #include <Adafruit_ST7735.h>
+#include <Fonts/FreeSans12pt7b.h>
 #include <SPI.h>                 // ESP32 core SPI
 #include <stdio.h>
 #include <Preferences.h>         // replaces EEPROM.h
@@ -78,8 +79,6 @@ volatile int16_t encoderPulseCount = 0;
  
  // Persistence helpers
 unsigned long lastSaveMs = 0;
-bool targetDirty = false;
-bool displayDirty = false;
 
 // RMT-based async DHT read state (non-blocking receive)
 static const rmt_channel_t DHT_RMT_CHANNEL = RMT_CHANNEL_0;
@@ -105,6 +104,9 @@ float lastValidTempC = NAN;
 bool lastButtonState = HIGH;
 unsigned long lastButtonMs = 0;
 unsigned long pressStartMs = 0;
+
+// text bounds
+uint16_t textWidth, textHeight;
 
 void IRAM_ATTR encoderISR() {
   // Minimal ISR: use rotary_step_s16 to update encoderPulseCount directly.
@@ -157,27 +159,33 @@ void setup() {
   // Initialize SPI with explicit pins for ESP32-C3
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
 
-  // Initialize SPI with a slower clock speed so it's more stable, otherwise
-  // the scren sometimes blanks out when receiving many rotary pulses.
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-  digitalWrite(TFT_CS, LOW);
-  // send commands/data
-  digitalWrite(TFT_CS, HIGH);
-  SPI.endTransaction();
-
   // Initialize display and let the Adafruit library manage SPI.
   println("ST7735: init start");
   // Ensure control pins are configured and stable before calling library init.
   pinMode(TFT_CS, OUTPUT);
-  digitalWrite(TFT_CS, HIGH);
   pinMode(TFT_DC, OUTPUT);
+
+  // Initialize SPI with a slower clock speed so it's more stable, otherwise
+  // the scren sometimes blanks out when receiving many rotary pulses.
+  SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(TFT_CS, HIGH);
   digitalWrite(TFT_DC, HIGH);
+  SPI.endTransaction();
+
   delay(10); // allow peripheral to settle
+
   // Call library init (use MINI160x80 PLUGIN for this module)
   tft.initR(INITR_MINI160x80_PLUGIN);
-  tft.setRotation(3);
+  tft.setFont(&FreeSans12pt7b);
+  {
+    int16_t x, y;
+    char text[] = "-CC.CCC";
+    tft.getTextBounds(text, 0, 100, &x, &y, &textWidth, &textHeight);
+  }
+  tft.setTextSize(1);
+  tft.setRotation(0);
   tft.enableDisplay(true);
-  println("ST7735: clear screen");
+  //println("ST7735: clear screen");
   tft.fillScreen(ST7735_BLACK);
 
   // Ensure screen is cleared to black and initial UI drawn
@@ -191,6 +199,7 @@ void setup() {
 
   // Backlight control pin (module BLK has onboard transistor)
   pinMode(BACKLIGHT_PIN, OUTPUT);
+  digitalWrite(BACKLIGHT_PIN, HIGH);
 
   attachInterrupt(digitalPinToInterrupt(ROTARY_CLK), encoderISR, CHANGE);
   // Also attach to DT so the ISR runs on changes of either channel (better capture on fast/cheap encoders)
@@ -200,6 +209,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ROTARY_SW), wakeISR, FALLING);
 
   // initialize relay OFF (assumes active HIGH; invert logic if needed)
+  //FIXME: should maybe check if relay is already on and needs to be?
   digitalWrite(RELAY_PIN, LOW);
 
   lastDHTReadMs = millis();
@@ -226,50 +236,52 @@ void setup() {
   updateDisplay(lastValidTempC, targetTenthsC);
 }
 
+void show(float temp, int16_t x, int16_t y, uint16_t color) {
+  // bounds calculation is slightly off
+  tft.setTextColor(color);
+  tft.fillRect(x, y - textHeight, textWidth + 20, textHeight + 1, ST77XX_BLACK);
+  // tft.fillRect(x, y - textHeight, textWidth + 20, textHeight + 1, ST77XX_RED);
+  // tft.fillRect(x, y - textHeight + 1, textWidth + 18, textHeight - 1, ST77XX_BLACK);
+  if (isnan(temp)) {
+    // pad "Err" to match numeric+unit width ("%5.1f C" -> 7 chars)
+    tft.setCursor(x, y);
+    tft.print("Err    ");
+  } else {
+    char buf[16];
+    char symbol = displayCelsius ? 'C' : 'F';
+    if (!displayCelsius) {
+      temp = temp * 9.0 / 5.0 + 32.0;
+    }
+    // numeric field: width 5 (space/sign + up to 2 digits + '.' + 1 decimal) + " C" = 7 chars
+    snprintf(buf, sizeof(buf), "%5.1f %c", temp, symbol);
+    // right-align the text
+    int16_t x1, y1;
+    uint16_t w, h;
+    tft.getTextBounds(buf, x, y, &x1, &y1, &w, &h);
+    tft.setCursor(78 - w, y);
+    tft.print(buf);
+    tft.drawCircle(x + textWidth - 4, y - textHeight / 2 + 8, 2, color);
+  }
+}
+
 void updateDisplay(float currentC, int16_t targetTenths) {
   // Full-screen redraw but use color to distinguish current (white) and target (light blue).
-  println("updating display...");
+  //println("updating display...");
   // Filling the screen causes flicker, use the setTextColor overload that accepts
   // a background colour already paints the background thus overwriting the space
   //tft.fillScreen(ST7735_BLACK);
 
-  tft.setTextSize(2);
+  // Target temperature (right) in light blue - also fixed-width
+  uint16_t lightBlue = tft.color565(120, 120, 255); // light blue (RGB: 120,120,255)
+  //tft.setTextColor(lightBlue, ST77XX_BLACK);
+  //tft.setCursor();
+  float tgtC = targetTenths / 10.0;
+  show(tgtC, 0, 50, lightBlue);
 
   // Current temperature (left) - print fixed-width numeric + unit to avoid residual chars
-  tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
-  tft.setCursor(8, 18);
-  if (isnan(currentC)) {
-    // pad "Err" to match numeric+unit width ("%5.1f C" -> 7 chars)
-    tft.print("Err    ");
-  } else {
-    char buf[16];
-    if (displayCelsius) {
-      // numeric field: width 5 (space/sign + up to 2 digits + '.' + 1 decimal) + " C" = 7 chars
-      snprintf(buf, sizeof(buf), "%5.1f C", currentC);
-      tft.print(buf);
-    } else {
-      float f = currentC * 9.0 / 5.0 + 32.0;
-      snprintf(buf, sizeof(buf), "%5.1f F", f);
-      tft.print(buf);
-    }
-  }
+  //tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+  show(currentC, 0, 140, ST77XX_WHITE);
 
-  // Target temperature (right) in light blue - also fixed-width
-  uint16_t lightBlue = tft.color565(173, 216, 230); // light blue (RGB: 173,216,230)
-  tft.setTextColor(lightBlue, ST77XX_BLACK);
-  tft.setCursor(70, 18);
-  float tgtC = targetTenths / 10.0;
-  {
-    char buf2[16];
-    if (displayCelsius) {
-      snprintf(buf2, sizeof(buf2), "%5.1f C", tgtC);
-      tft.print(buf2);
-    } else {
-      float tf = tgtC * 9.0 / 5.0 + 32.0;
-      snprintf(buf2, sizeof(buf2), "%5.1f F", tf);
-      tft.print(buf2);
-    }
-  }
 
   // // Compressor running indicator (snowflake) between the values
   // // Draw a simple snowflake icon centered at (80, 20)
@@ -490,18 +502,20 @@ void controlTemperature(float currentC, int16_t targetTenths) {
 void loop() {
   //println("in loop...");
   //delay(500);
+  bool targetDirty = false;
+  bool displayDirty = false;
   unsigned long now = millis();
+  int16_t pulses = 0;
 
   // 1) Consume encoder pulses produced by the quadrature ISR and convert pulses -> steps
   {
-    int16_t pulses = 0;
     noInterrupts();
     pulses = encoderPulseCount;
     encoderPulseCount = 0;
     interrupts();
 
     if (pulses != 0) {
-      println("Detected pulses");
+      //println("Detected pulses");
       static int16_t remainder = 0;
       remainder += pulses;
       int16_t steps = remainder / ENCODER_PULSES_PER_STEP;
@@ -514,7 +528,6 @@ void loop() {
         if (newTarget != targetTenthsC) {
           targetTenthsC = newTarget;
           targetDirty = true; // mark for persistence
-          // defer display update to the single update at the end of loop()
           displayDirty = true;
         }
       }
@@ -532,7 +545,7 @@ void loop() {
   }
   
   // // Keep display on for a short period after any updates for user feedback
-  // if (now < displayOnUntilMs) {
+  // if (now - displayOnUntilMs < DISPLAY_ON_AFTER_WAKE_MS) {
   //   digitalWrite(BACKLIGHT_PIN, HIGH);
   // } else {
   //   digitalWrite(BACKLIGHT_PIN, LOW);
@@ -540,7 +553,7 @@ void loop() {
   
   // //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and timer (approx WDT)
   // //  Only sleep if no recent activity and display not required.
-  // bool idle = (encoderPulseCount == 0) && !targetDirty;
+  // bool idle = (pulses == 0) && !targetDirty;
   // if (idle) {
   //   // Configure timer wake for approximately WDT_SLEEP_S seconds (esp_light_sleep)
   //   esp_sleep_enable_timer_wakeup((uint64_t)WDT_SLEEP_S * 1000000ULL);
@@ -552,11 +565,8 @@ void loop() {
   //   displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
   // }
 
-  // (quadrature ISR handles bounce; no encoder lock needed)
-
-  // 2) Button handled and debounced in loop (no millis() in ISR)
+  // Button handled and debounced in loop (no millis() in ISR)
   bool sw = digitalRead(ROTARY_SW);
-
   if (sw == LOW && lastButtonState == HIGH && (now - lastButtonMs) > BUTTON_DEBOUNCE_MS) {
     // Button pressed (debounced start)
     println("Detected button edge");
@@ -575,7 +585,6 @@ void loop() {
     }
     lastButtonMs = now;
   }
-
   lastButtonState = sw;
 
   // // 3) Start non-blocking DHT read sequence when interval reached, and poll progress
