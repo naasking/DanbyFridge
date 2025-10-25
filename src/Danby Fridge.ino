@@ -1,6 +1,7 @@
 #include <DHT.h>
 #include <Adafruit_ST7735.h>
 #include <SPI.h>                 // ESP32 core SPI
+#include <stdio.h>
 #include <Preferences.h>         // replaces EEPROM.h
 #include "rotary.h"
 #include <esp_sleep.h>
@@ -61,7 +62,8 @@ static Preferences prefs;
 #define DHT_RMT_ONE_THRESHOLD_US 50   // high-duration >= this -> bit=1
 #define DHT_RMT_TIMEOUT_MS 300        // timeout for a single RMT attempt (ms)
 
-#define println(text) if (Serial && Serial.isConnected()) Serial.println(text)
+#define println(text)
+//#define println(text) if (Serial && Serial.isConnected()) Serial.println(text)
 
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1); // RST tied HIGH on module; pass -1 to disable software reset
@@ -77,6 +79,7 @@ volatile int16_t encoderPulseCount = 0;
  // Persistence helpers
 unsigned long lastSaveMs = 0;
 bool targetDirty = false;
+bool displayDirty = false;
 
 // RMT-based async DHT read state (non-blocking receive)
 static const rmt_channel_t DHT_RMT_CHANNEL = RMT_CHANNEL_0;
@@ -105,9 +108,10 @@ unsigned long pressStartMs = 0;
 
 void IRAM_ATTR encoderISR() {
   // Minimal ISR: use rotary_step_s16 to update encoderPulseCount directly.
-  // rotary_step_s16 performs the state update and increments/decrements the counter.
-  uint8_t b = digitalRead(ROTARY_CLK); // rota (LSB)
-  uint8_t a = digitalRead(ROTARY_DT);  // rotb (MSB)
+  // rotary_step_s16 expects (count, state, rotb, rota).
+  // Read DT (rotb) first, then CLK (rota), and pass in that order to avoid swapped inputs.
+  uint8_t a = digitalRead(ROTARY_DT);  // rota (LSB)
+  uint8_t b = digitalRead(ROTARY_CLK); // rotb (MSB)
   rotary_step_s16(&encoderPulseCount, &rot_state, b, a);
 }
 
@@ -153,6 +157,14 @@ void setup() {
   // Initialize SPI with explicit pins for ESP32-C3
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
 
+  // Initialize SPI with a slower clock speed so it's more stable, otherwise
+  // the scren sometimes blanks out when receiving many rotary pulses.
+  SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(TFT_CS, LOW);
+  // send commands/data
+  digitalWrite(TFT_CS, HIGH);
+  SPI.endTransaction();
+
   // Initialize display and let the Adafruit library manage SPI.
   println("ST7735: init start");
   // Ensure control pins are configured and stable before calling library init.
@@ -181,6 +193,8 @@ void setup() {
   pinMode(BACKLIGHT_PIN, OUTPUT);
 
   attachInterrupt(digitalPinToInterrupt(ROTARY_CLK), encoderISR, CHANGE);
+  // Also attach to DT so the ISR runs on changes of either channel (better capture on fast/cheap encoders)
+  attachInterrupt(digitalPinToInterrupt(ROTARY_DT), encoderISR, CHANGE);
   // Wake-only interrupt for rotary pushbutton (FALLING edge). ISR does nothing
   // beyond waking the MCU; actual button processing is done in the loop.
   attachInterrupt(digitalPinToInterrupt(ROTARY_SW), wakeISR, FALLING);
@@ -215,51 +229,47 @@ void setup() {
 void updateDisplay(float currentC, int16_t targetTenths) {
   // Full-screen redraw but use color to distinguish current (white) and target (light blue).
   println("updating display...");
-  tft.fillScreen(ST7735_BLACK);
+  // Filling the screen causes flicker, use the setTextColor overload that accepts
+  // a background colour already paints the background thus overwriting the space
+  //tft.fillScreen(ST7735_BLACK);
 
   tft.setTextSize(2);
 
-  // Current temperature (left)
+  // Current temperature (left) - print fixed-width numeric + unit to avoid residual chars
   tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
   tft.setCursor(8, 18);
   if (isnan(currentC)) {
-    tft.print("Err");
+    // pad "Err" to match numeric+unit width ("%5.1f C" -> 7 chars)
+    tft.print("Err    ");
   } else {
+    char buf[16];
     if (displayCelsius) {
-      tft.print(currentC, 1);
-      tft.print(" C");
+      // numeric field: width 5 (space/sign + up to 2 digits + '.' + 1 decimal) + " C" = 7 chars
+      snprintf(buf, sizeof(buf), "%5.1f C", currentC);
+      tft.print(buf);
     } else {
       float f = currentC * 9.0 / 5.0 + 32.0;
-      tft.print(f, 1);
-      tft.print(" F");
+      snprintf(buf, sizeof(buf), "%5.1f F", f);
+      tft.print(buf);
     }
   }
 
-  // Target temperature (right) in light blue
+  // Target temperature (right) in light blue - also fixed-width
   uint16_t lightBlue = tft.color565(173, 216, 230); // light blue (RGB: 173,216,230)
   tft.setTextColor(lightBlue, ST77XX_BLACK);
-  tft.setCursor(80, 18);
+  tft.setCursor(70, 18);
   float tgtC = targetTenths / 10.0;
-  if (displayCelsius) {
-    tft.print(tgtC, 1);
-    tft.print(" C");
-  } else {
-    float tf = tgtC * 9.0 / 5.0 + 32.0;
-    tft.print(tf, 1);
-    tft.print(" F");
+  {
+    char buf2[16];
+    if (displayCelsius) {
+      snprintf(buf2, sizeof(buf2), "%5.1f C", tgtC);
+      tft.print(buf2);
+    } else {
+      float tf = tgtC * 9.0 / 5.0 + 32.0;
+      snprintf(buf2, sizeof(buf2), "%5.1f F", tf);
+      tft.print(buf2);
+    }
   }
-
-  // {
-  //   long cur = millis();
-  //   static long ms = 0;
-  //   if (cur - ms > 2000)
-  //   {
-      println("Printing time counter...");
-      tft.setCursor(50, 50);
-      tft.print(millis());
-  //    ms = cur;
-  //   }
-  // }
 
   // // Compressor running indicator (snowflake) between the values
   // // Draw a simple snowflake icon centered at (80, 20)
@@ -504,8 +514,8 @@ void loop() {
         if (newTarget != targetTenthsC) {
           targetTenthsC = newTarget;
           targetDirty = true; // mark for persistence
-          // immediate feedback to user
-          updateDisplay(lastValidTempC, targetTenthsC);
+          // defer display update to the single update at the end of loop()
+          displayDirty = true;
         }
       }
     }
@@ -560,7 +570,8 @@ void loop() {
     if (pressDuration >= LONG_PRESS_MS) {
       println("Detected button press");
       displayCelsius = !displayCelsius;
-      updateDisplay(lastValidTempC, targetTenthsC);
+      // mark the display dirty; actual redraw happens once at end of loop()
+      displayDirty = true;
     }
     lastButtonMs = now;
   }
@@ -610,11 +621,9 @@ void loop() {
   //   }
   // }
 
-  {
-    static unsigned long ms = 0;
-    if (now - ms > 2000) {
-      updateDisplay(lastValidTempC, targetTenthsC);
-      ms = now;
-    }
+  // Single display update point: update once per loop if any condition requested it.
+  if (displayDirty) {
+    updateDisplay(lastValidTempC, targetTenthsC);
+    displayDirty = false;
   }
 }
