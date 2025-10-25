@@ -20,13 +20,13 @@ static Preferences prefs;
 #define RELAY_PIN       1   // Safe -- connected to HW-040 relay module
 
 // Rotary encoder -- grouped on the right side
-#define ROTARY_SW       9   // Strapping: OK for input, button held down at reset boots into serial bootloader
-#define ROTARY_CLK      8   // Strapping: OK for input, avoid strong pulls at reset
-#define ROTARY_DT       20  // Strapping: OK for input
+#define ROTARY_SW       9  // Strapping: rotary encoder button press at start boots into download mode
+#define ROTARY_CLK      7  // Safe
+#define ROTARY_DT       6  // Safe
 
 // TFT SPI -- grouped on the left side
 #define TFT_DC          0   // Safe
-#define BACKLIGHT_PIN   2   // Strapping: defaults LOW, safe for output after boot
+#define BACKLIGHT_PIN   2   // Strapping: defaults HIGH
 #define TFT_CS          3   // Safe
 #define TFT_MOSI        4   // Safe (SDA on TFT7735)
 #define TFT_SCK         5   // Safe (SCL on TFT7735)
@@ -159,7 +159,7 @@ void setup() {
 
   // Initialize SPI with a slower clock speed so it's more stable, otherwise
   // the scren sometimes blanks out when receiving many rotary pulses.
-  SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
+  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
   digitalWrite(TFT_CS, LOW);
   // send commands/data
   digitalWrite(TFT_CS, HIGH);
