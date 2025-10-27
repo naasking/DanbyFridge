@@ -1,9 +1,7 @@
-#include <DHT.h>
 #include <Adafruit_ST7735.h>
 #include <Fonts/FreeSans12pt7b.h>
 #include <SPI.h>                 // ESP32 core SPI
-#include <stdio.h>
-#include <Preferences.h>         // replaces EEPROM.h
+#include <Preferences.h>         // for saving data
 #include "rotary.h"
 #include <esp_sleep.h>
 #include <esp_pm.h>
@@ -11,17 +9,17 @@
 #include "soc/rmt_reg.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
+#include "async.h"
 
-#define DHTTYPE DHT22
 // Preferences instance for non-volatile storage on ESP32
 static Preferences prefs;
 
 // === ESP32-C3 Super mini Pin Mapping ===
-#define DHTPIN          21  // Safe
+#define ADC_PIN         10  // Safe -- FIXME: not an ADC pin so will have to move
 #define RELAY_PIN       2   // Safe -- connected to HW-040 relay module
 
 // Rotary encoder -- grouped on the right side
-#define ROTARY_SW       9  // Strapping: rotary encoder button press at start boots into download mode
+#define ROTARY_SW       8  // Strapping
 #define ROTARY_CLK      7  // Safe
 #define ROTARY_DT       6  // Safe
 
@@ -36,8 +34,22 @@ static Preferences prefs;
 // === Notes ===
 // - All pins are 3.3V only (no 5V tolerance).
 
+// ADC config
+#define VREF            3.3f
+#define ADC_BITS        12
+#define SAMPLES_TOTAL   64
+#define SAMPLE_DELAY_MS 10
+
+// Thermistor constants -- probably use a 100K NTC 3950
+#define R_FIXED 100000.0f   // 100kΩ reference resistor
+#define R0      100000.0f   // 100kΩ at 25 °C
+#define BETA    3950.0f
+#define T0      298.15f     // 25 °C in Kelvin
+
+// EMA smoothing factor
+#define EMA_ALPHA 0.1f   // adjust between 0.05–0.2 depending on smoothness
+
 #define DISPLAY_UPDATE_INTERVAL 200
-#define DHT_READ_INTERVAL 1000
 #define CONTROL_INTERVAL 10000
 #define HYSTERESIS_TENTHS 5      // 0.5°C hysteresis
 #define ENCODER_STEP_TENTHS 1    // 0.1°C per encoder step
@@ -53,20 +65,23 @@ static Preferences prefs;
 #define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
 #define DISPLAY_ON_AFTER_WAKE_MS 3000 // keep display on for some time after wake for user feedback
 #define COMPRESSOR_MIN_OFF_MS (4UL * 60UL * 1000UL) // 4 minutes minimum off time for compressor starter
-/* DHT read retry settings and RMT parsing thresholds (tunable) */
-#define DHT_MAX_RETRIES 3
-#define DHT_RETRY_DELAY_MS 200
-
-/* RMT parsing thresholds (microseconds) */
-#define DHT_RMT_HIGH_MIN_US 20        // ignore highs shorter than this
-#define DHT_RMT_ONE_THRESHOLD_US 50   // high-duration >= this -> bit=1
-#define DHT_RMT_TIMEOUT_MS 300        // timeout for a single RMT attempt (ms)
 
 #define println(text)
 //#define println(text) if (Serial && Serial.isConnected()) Serial.println(text)
 
-DHT dht(DHTPIN, DHTTYPE);
-Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1); // RST tied HIGH on module; pass -1 to disable software reset
+// RST tied HIGH on module; pass -1 to disable software reset
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1);
+
+// Thermistor async function state
+typedef struct {
+    async_state;                // the async state
+    int sampleCount;            // the number of samples taken
+    uint32_t acc;               // accumulated temperature reading
+    unsigned long lastSampleMs; // last time a sample was taken
+    bool expMovingAvg;          // smoothing is enabled
+} ThermistorState;
+
+ThermistorState thermState;
 
  // Internal state stored in tenths of °C to avoid non-atomic float access
 volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
@@ -79,26 +94,14 @@ volatile int16_t encoderPulseCount = 0;
  // Persistence helpers
 unsigned long lastSaveMs = 0;
 
-// RMT-based async DHT read state (non-blocking receive)
-static const rmt_channel_t DHT_RMT_CHANNEL = RMT_CHANNEL_0;
-static RingbufHandle_t dhtRmtRb = NULL;
-static bool dhtRmtActive = false;
-static unsigned long dhtRmtStartMs = 0;
-static rmt_config_t dhtRmtConfig;
-
- // Compressor/relay safety
+// Compressor/relay safety
 bool relayOn = false;
 unsigned long lastRelayOffMs = 0;
 
- // DHT read state helpers
 static bool controlReadPending = false;
-
 bool displayCelsius = true;
-unsigned long lastDHTReadMs = 0;
-
 unsigned long displayOnUntilMs = 0;
 unsigned long wdtWakeCount = 0;
-
 float lastValidTempC = NAN;
 bool lastButtonState = HIGH;
 unsigned long lastButtonMs = 0;
@@ -123,36 +126,11 @@ void IRAM_ATTR wakeISR() {
 }
 
 void setup() {
-  Serial.begin(115200);
-  Serial.setTxTimeoutMs(0);
-  delay(3000);
-  println("Program started...");
-
-  // // Continue normal initialization
-  // dht.begin();
-
-  // // Initialize RMT for DHT non-blocking reads once (driver + ringbuffer)
-  // {
-  //   rmt_config_t rmt_rx;
-  //   rmt_rx.rmt_mode = RMT_MODE_RX;
-  //   rmt_rx.channel = DHT_RMT_CHANNEL;
-  //   rmt_rx.gpio_num = (gpio_num_t)DHTPIN;
-  //   rmt_rx.clk_div = 80; // 1us resolution
-  //   rmt_rx.mem_block_num = 2;
-  //   // Apply config and install driver once
-  //   if (rmt_config(&rmt_rx) == ESP_OK) {
-  //     if (rmt_driver_install(rmt_rx.channel, 1000, 0) == ESP_OK) {
-  //       // obtain ringbuffer handle (used by pollRmtDhtAttempt)
-  //       rmt_get_ringbuf_handle(rmt_rx.channel, &dhtRmtRb);
-  //       // keep driver installed for subsequent reads; do not uninstall until program end
-  //     } else {
-  //       println("RMT driver install failed");
-  //     }
-  //   } else {
-  //     println("RMT config failed");
-  //   }
-  //   // Note: dhtRmtRb may be NULL if driver/ringbuf not available; startRmtDhtAttempt will check
-  // }
+  //Serial.begin(115200, SERIAL_8N1, -1);
+  // Serial.begin(115200);
+  // Serial.setTxTimeoutMs(0);
+  //delay(3000);
+  //println("Program started...");
 
   // Initialize SPI with explicit pins for ESP32-C3
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
@@ -191,7 +169,9 @@ void setup() {
   // Backlight control pin (module BLK has onboard transistor)
   pinMode(BACKLIGHT_PIN, OUTPUT);
   digitalWrite(BACKLIGHT_PIN, HIGH);
-  displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
+
+  unsigned long now = millis();
+  displayOnUntilMs = now + DISPLAY_ON_AFTER_WAKE_MS;
 
   attachInterrupt(digitalPinToInterrupt(ROTARY_CLK), encoderISR, CHANGE);
   // Also attach to DT so the ISR runs on changes of either channel (better capture on fast/cheap encoders)
@@ -203,8 +183,6 @@ void setup() {
   // initialize relay OFF (assumes active HIGH; invert logic if needed)
   //FIXME: should maybe check if relay is already on and needs to be?
   digitalWrite(RELAY_PIN, LOW);
-
-  lastDHTReadMs = millis();
 
   // Load persisted target temperature (tenths of °C). Validate range, otherwise set to current measured temp if available.
   prefs.begin("fridge", false);
@@ -219,7 +197,11 @@ void setup() {
   // prefs.end(); // removed to keep prefs active
 
   // initialize save timestamp to avoid immediate write
-  lastSaveMs = millis();
+  lastSaveMs = now;
+
+  // initialize the thermistor task
+  async_init(&thermState);
+  thermState.expMovingAvg = false;
 
   // ensure display shows current values at startup
   updateDisplay(lastValidTempC, targetTenthsC);
@@ -230,9 +212,9 @@ void show(float temp, int16_t x, int16_t y, uint16_t color) {
   tft.setTextColor(color);
   tft.fillRect(x, y - textHeight, textWidth + 20, textHeight + 1, ST77XX_BLACK);
   if (isnan(temp)) {
-    // pad "Err" to match numeric+unit width ("%5.1f C" -> 7 chars)
+    // error code should print out 7 chars to match expected length
     tft.setCursor(x, y);
-    tft.print("Err    ");
+    tft.printf("ERR    ");
   } else {
     char buf[16];
     char symbol = displayCelsius ? 'C' : 'F';
@@ -261,7 +243,7 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   show(tgtC, 0, 50, lightBlue);
 
   // Current temperature (left) - print fixed-width numeric + unit to avoid residual chars
-  show(currentC, 0, 140, ST77XX_WHITE);
+  show(currentC, 0, 120, ST77XX_WHITE);
 
   // Compressor running indicator (snowflake) between the values
   // Draw a simple snowflake icon centered at (80, 20)
@@ -297,170 +279,55 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   }
 }
 
-static bool startRmtDhtAttempt() {
-  // Start an RMT receive attempt using the driver and ringbuffer already initialized in setup().
-  // Returns true if the attempt was successfully initiated.
-  if (!dhtRmtRb) {
-    // RMT driver or ringbuffer not available
-    return false;
-  }
+/// @brief  Read the thermistor value.
+/// @param s    The thermistor state.
+/// @param now  The current time, bound to mills().
+/// @return     The async function status.
+async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
+    async_begin(s);
 
-  // Send start signal: pull pin low for 2 ms, then high ~40 us
-  pinMode(DHTPIN, OUTPUT);
-  digitalWrite(DHTPIN, LOW);
-  ets_delay_us(2000); // 2 ms
-  digitalWrite(DHTPIN, HIGH);
-  ets_delay_us(40); // 40 us
-  pinMode(DHTPIN, INPUT_PULLUP);
+    s->sampleCount = 0;
+    s->acc = 0;
 
-  // Start receiving on preconfigured channel
-  if (rmt_rx_start(DHT_RMT_CHANNEL, true) != ESP_OK) {
-    // ensure ringbuffer is clean if start failed
-    if (dhtRmtRb) {
-      // drain any available item
-      size_t rx_size = 0;
-      void* item = xRingbufferReceive(dhtRmtRb, &rx_size, 0);
-      if (item) vRingbufferReturnItem(dhtRmtRb, item);
+    while (s->sampleCount < SAMPLES_TOTAL) {
+        // wait between samples
+        await(now - s->lastSampleMs >= SAMPLE_DELAY_MS);
+        s->lastSampleMs = now;
+
+        int raw = analogRead(ADC_PIN);
+        s->acc += raw;
+        s->sampleCount++;
     }
-    return false;
-  }
 
-  dhtRmtActive = true;
-  dhtRmtStartMs = millis();
-  return true;
-}
+    // Compute average ADC value
+    {
+      float rawAvg = (float)s->acc / SAMPLES_TOTAL;
+      float v = rawAvg * VREF / ((1 << ADC_BITS) - 1);
 
-// Non-blocking poll: returns NAN if no result yet, or temperature if data ready, or NaN when attempt exhausted.
-static float pollRmtDhtAttempt() {
-  if (!dhtRmtActive) return NAN;
+      // Compute thermistor resistance
+      float rTherm = R_FIXED * (VREF / v - 1.0f);
 
-  // Try to receive available buffer without blocking
-  size_t rx_size = 0;
-  rmt_item32_t* items = (rmt_item32_t*) xRingbufferReceive(dhtRmtRb, &rx_size, 0);
-  if (!items) {
-    // No data yet. Check timeout (300 ms) to consider attempt failed.
-      if (millis() - dhtRmtStartMs > 300) {
-      // timeout: clean up and mark not active
-      rmt_rx_stop(DHT_RMT_CHANNEL);
-      // drain any pending item if present
-      size_t _sz = 0;
-      void* _it = xRingbufferReceive(dhtRmtRb, &_sz, 0);
-      if (_it) vRingbufferReturnItem(dhtRmtRb, _it);
-      dhtRmtActive = false;
-      return NAN;
-    }
-    return NAN; // still waiting
-  }
-
-  int item_count = rx_size / sizeof(rmt_item32_t);
-
-  // Collect high durations into a fixed buffer (avoid heap allocations)
-  uint32_t highs[128];
-  int highs_cnt = 0;
-  for (int i = 0; i < item_count; ++i) {
-    if (items[i].level0 == 1 && highs_cnt < 128) highs[highs_cnt++] = items[i].duration0;
-    if (items[i].level1 == 1 && highs_cnt < 128) highs[highs_cnt++] = items[i].duration1;
-  }
-
-  // Return RMT buffer
-  vRingbufferReturnItem(dhtRmtRb, (void*)items);
-
-  // Stop receiver for this attempt; keep driver installed for subsequent reads
-  rmt_rx_stop(DHT_RMT_CHANNEL);
-  dhtRmtActive = false;
-
-  // Filter relevant highs into a fixed buffer
-  uint32_t bitHighs[64];
-  int bitHighs_cnt = 0;
-  for (int i = 0; i < highs_cnt; ++i) {
-    uint32_t d = highs[i];
-    if (d > DHT_RMT_HIGH_MIN_US && bitHighs_cnt < 64) bitHighs[bitHighs_cnt++] = d;
-  }
-  if (bitHighs_cnt < 40) return NAN;
-
-  uint8_t bits[40];
-  int bits_cnt = 0;
-  for (int i = 0; i < bitHighs_cnt && bits_cnt < 40; ++i) {
-    uint32_t dur = bitHighs[i];
-    bits[bits_cnt++] = (dur > DHT_RMT_ONE_THRESHOLD_US) ? 1 : 0;
-  }
-  if (bits_cnt < 40) return NAN;
-
-  uint8_t data[5] = {0};
-  for (int i = 0; i < 40; ++i) {
-    data[i/8] <<= 1;
-    data[i/8] |= bits[i];
-  }
-  uint8_t sum = data[0] + data[1] + data[2] + data[3];
-  if (sum != data[4]) return NAN;
-
-  int16_t rawHum = (data[0] << 8) | data[1];
-  int16_t rawTemp = (data[2] << 8) | data[3];
-  float tempC = 0.0f;
-  if (rawTemp & 0x8000) {
-    rawTemp &= 0x7FFF;
-    tempC = -(rawTemp / 10.0f);
-  } else {
-    tempC = rawTemp / 10.0f;
-  }
-  return tempC;
-}
-
-// Non-blocking retry manager: starts attempts and polls them over multiple loop iterations.
-// Call startDhtRetries() to begin; call pollDhtRetries(&outTemp) repeatedly until it returns true (done).
-static int dhtRetriesLeft = 0;
-static unsigned long dhtNextAttemptMs = 0;
-static bool dhtRetryActive = false;
-
-static void startDhtRetries() {
-  dhtRetriesLeft = DHT_MAX_RETRIES;
-  dhtNextAttemptMs = millis();
-  dhtRetryActive = true;
-  dhtRmtActive = false;
-}
-
-static bool pollDhtRetries(float* outTemp) {
-  if (!dhtRetryActive) return false;
-
-  unsigned long now = millis();
-
-  if (dhtRmtActive) {
-    float res = pollRmtDhtAttempt();
-    if (!isnan(res)) {
-      *outTemp = res;
-      dhtRetryActive = false;
-      return true;
-    }
-    // still waiting for RMT data
-    return false;
-  } else {
-    if (now >= dhtNextAttemptMs) {
-      // Start a new RMT attempt
-      if (startRmtDhtAttempt()) {
-        // attempt started, poll in subsequent loop iterations
-        return false;
+      // Beta equation
+      float invT = (1.0f / T0) + (1.0f / BETA) * logf(rTherm / R0);
+      float tempK = 1.0f / invT;
+      float tempC = tempK - 273.15f;
+      if (s->expMovingAvg) {
+        *temp = EMA_ALPHA * tempC  + (1.0f - EMA_ALPHA) * *temp;
       } else {
-        // failed to start RMT; treat as attempt used
-        dhtRetriesLeft--;
-        if (dhtRetriesLeft <= 0) {
-          dhtRetryActive = false;
-          *outTemp = NAN;
-          return true;
-        }
-        dhtNextAttemptMs = now + DHT_RETRY_DELAY_MS;
-        return false;
+        s->expMovingAvg = true;
+        *temp = tempC;
       }
     }
-    return false;
-  }
+    async_end;
 }
 
-void controlTemperature(float currentC, int16_t targetTenths) {
+
+void controlTemperature(unsigned long now, float currentC, int16_t targetTenths) {
   // If the reading is invalid, skip control to avoid spurious changes.
-  if (isnan(currentC)) return;
+  if (isnan(currentC))
+    return;
 
   int16_t currentTenths = (int16_t)round(currentC * 10.0);
-  unsigned long now = millis();
 
   // Need to turn ON when current is below target minus hysteresis.
   if (currentTenths <= (targetTenths - HYSTERESIS_TENTHS)) {
@@ -469,13 +336,10 @@ void controlTemperature(float currentC, int16_t targetTenths) {
       if ((now - lastRelayOffMs) >= COMPRESSOR_MIN_OFF_MS) {
         digitalWrite(RELAY_PIN, HIGH);
         relayOn = true;
-      } else {
-        // Still in minimum-off window: do not start yet.
       }
     }
-  }
-  // Need to turn OFF when current is above target plus hysteresis.
-  else if (currentTenths >= (targetTenths + HYSTERESIS_TENTHS)) {
+  } else if (currentTenths >= (targetTenths + HYSTERESIS_TENTHS)) {
+    // Need to turn OFF when current is above target plus hysteresis.
     if (relayOn) {
       digitalWrite(RELAY_PIN, LOW);
       relayOn = false;
@@ -490,7 +354,7 @@ void loop() {
   unsigned long now = millis();
   int16_t pulses = 0;
 
-  // 1) Consume encoder pulses produced by the quadrature ISR and convert pulses -> steps
+  // Consume encoder pulses produced by the quadrature ISR and convert pulses -> steps
   {
     noInterrupts();
     pulses = encoderPulseCount;
@@ -556,7 +420,7 @@ void loop() {
   //  Only sleep if no recent activity and display not required.
   bool idle = (pulses == 0) && !targetDirty && !displayDirty;
   if (!idle) {
-    displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
+    displayOnUntilMs = now + DISPLAY_ON_AFTER_WAKE_MS;
   } else if (!displayOn) {
     // // Configure timer wake for approximately WDT_SLEEP_S seconds (esp_light_sleep)
     // esp_sleep_enable_timer_wakeup((uint64_t)WDT_SLEEP_S * 1000000ULL);
@@ -565,36 +429,8 @@ void loop() {
     // Woke up (either via timer or external INT)
     // wdtWakeCount++;
     // keep display on briefly after wake for feedback
-    // displayOnUntilMs = millis() + DISPLAY_ON_AFTER_WAKE_MS;
+    // displayOnUntilMs = now + DISPLAY_ON_AFTER_WAKE_MS;
   }
-
-  // // 3) Start non-blocking DHT read sequence when interval reached, and poll progress
-  // if (now - lastDHTReadMs >= DHT_READ_INTERVAL) {
-  //   startDhtRetries();
-  //   lastDHTReadMs = now;
-  // }
-
-  // // Poll any in-progress non-blocking DHT attempt (RMT); handle initial/control outcomes
-  // {
-  //   float dhtTemp;
-  //   if (dhtRetryActive) {
-  //     if (pollDhtRetries(&dhtTemp)) {
-  //       if (!isnan(dhtTemp)) {
-  //         lastValidTempC = dhtTemp;
-  //         if (controlReadPending) {
-  //           controlReadPending = false;
-  //           controlTemperature(lastValidTempC, targetTenthsC);
-  //           updateDisplay(lastValidTempC, targetTenthsC);
-  //         }
-  //       } else {
-  //         println("DHT read failed (retries)");
-  //         // clear pending flags on failure
-  //         controlReadPending = false;
-  //       }
-  //     }
-  //   }
-  // }
-
 
   // // 5) Control relay periodically using WDT wake count approximation
   // // WDT interval roughly WDT_SLEEP_S seconds per LowPower wake.
@@ -604,12 +440,13 @@ void loop() {
   // if (elapsedS >= CONTROL_INTERVAL_S) {
   //   // Clear accumulated wake count
   //   wdtWakeCount = 0;
-  //   // Start a non-blocking DHT read for control if not already active
-  //   if (!dhtRetryActive && !controlReadPending) {
-  //     startDhtRetries();
-  //     controlReadPending = true;
-  //   }
   // }
+
+  float t = lastValidTempC;
+  if (readThermistor(&thermState, now, &t) == ASYNC_DONE) {
+    displayDirty = true;
+    lastValidTempC = t;
+  }
 
   // Single display update point: update once per loop if any condition requested it.
   if (displayDirty) {
