@@ -1,4 +1,3 @@
-#include <DHT.h>
 #include <Adafruit_ST7735.h>
 #include <Fonts/FreeSans12pt7b.h>
 #include <SPI.h>                 // ESP32 core SPI
@@ -12,12 +11,11 @@
 #include "freertos/ringbuf.h"
 #include "async.h"
 
-#define DHTTYPE DHT22
 // Preferences instance for non-volatile storage on ESP32
 static Preferences prefs;
 
 // === ESP32-C3 Super mini Pin Mapping ===
-#define DHTPIN          10  // Safe
+#define ADC_PIN         10  // Safe -- FIXME: not an ADC pin so will have to move
 #define RELAY_PIN       2   // Safe -- connected to HW-040 relay module
 
 // Rotary encoder -- grouped on the right side
@@ -36,8 +34,22 @@ static Preferences prefs;
 // === Notes ===
 // - All pins are 3.3V only (no 5V tolerance).
 
+// ADC config
+#define VREF            3.3f
+#define ADC_BITS        12
+#define SAMPLES_TOTAL   64
+#define SAMPLE_DELAY_MS 10
+
+// Thermistor constants -- probably use a 100K NTC 3950
+#define R_FIXED 100000.0f   // 100kΩ reference resistor
+#define R0      100000.0f   // 100kΩ at 25 °C
+#define BETA    3950.0f
+#define T0      298.15f     // 25 °C in Kelvin
+
+// EMA smoothing factor
+#define EMA_ALPHA 0.1f   // adjust between 0.05–0.2 depending on smoothness
+
 #define DISPLAY_UPDATE_INTERVAL 200
-#define DHT_READ_INTERVAL 1000
 #define CONTROL_INTERVAL 10000
 #define HYSTERESIS_TENTHS 5      // 0.5°C hysteresis
 #define ENCODER_STEP_TENTHS 1    // 0.1°C per encoder step
@@ -53,24 +65,23 @@ static Preferences prefs;
 #define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
 #define DISPLAY_ON_AFTER_WAKE_MS 3000 // keep display on for some time after wake for user feedback
 #define COMPRESSOR_MIN_OFF_MS (4UL * 60UL * 1000UL) // 4 minutes minimum off time for compressor starter
-/* DHT read retry settings and RMT parsing thresholds (tunable) */
-#define DHT_MAX_RETRIES 3
-//#define DHT_RETRY_DELAY_MS 200
-#define DHT_RETRY_DELAY_MS 2000
-#define DHT_MAX_RETRIES    3
-#define DHT_TIMEOUT_MS     300
-#define DHT_RCV_ITEMS      100
-
-/* RMT parsing thresholds (microseconds) */
-#define DHT_RMT_HIGH_MIN_US 20        // ignore highs shorter than this
-#define DHT_RMT_ONE_THRESHOLD_US 50   // high-duration >= this -> bit=1
-#define DHT_RMT_TIMEOUT_MS 300        // timeout for a single RMT attempt (ms)
-#define DHT22_BITS 40                 // bits in the RMT stream
 
 #define println(text)
 //#define println(text) if (Serial && Serial.isConnected()) Serial.println(text)
-DHT dht(DHTPIN, DHTTYPE);
-Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1); // RST tied HIGH on module; pass -1 to disable software reset
+
+// RST tied HIGH on module; pass -1 to disable software reset
+Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1);
+
+// Thermistor async function state
+typedef struct {
+    async_state;                // the async state
+    int sampleCount;            // the number of samples taken
+    uint32_t acc;               // accumulated temperature reading
+    unsigned long lastSampleMs; // last time a sample was taken
+    bool expMovingAvg;          // smoothing is enabled
+} ThermistorState;
+
+ThermistorState thermState;
 
  // Internal state stored in tenths of °C to avoid non-atomic float access
 volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
@@ -83,30 +94,12 @@ volatile int16_t encoderPulseCount = 0;
  // Persistence helpers
 unsigned long lastSaveMs = 0;
 
-// status codes for the DHT subsystem
-typedef enum  {
-  DHT_OK                   =  0, // device in a good state
-  DHT_UNINITIALIZED        =  1, // device uninitialized
-  DHT_ERR_DRIVER_INSTALL   =  2, // couldn't install driver
-  DHT_ERR_RMT_CONFIG       =  3, // couldn't configure RMT
-  DHT_ERR_BUFFER           =  4, // couldn't allocate buffer
-  DHT_ERR_RMT_START        =  5, // Failed to start RMT RX
-  DHT_ERR_NO_ITEMS         =  6, // Ringbuffer returned NULL or len == 0
-  DHT_ERR_NOT_ENOUGH_ITEMS =  7, // Too few items to represent a full frame
-  DHT_ERR_CHECKSUM         =  8, // Checksum mismatch
-  DHT_ERR_PARSE            =  9, // Parse failed (timing/format error)
-  DHT_ERR_TIMEOUT          = 10, // Timed out waiting for data
-  DHT_ERR_RETRIES_EXHAUSTED= 11, // All retries used up without success
-} DHT_STATUS;
-
 // Compressor/relay safety
 bool relayOn = false;
 unsigned long lastRelayOffMs = 0;
 
-// DHT read state helpers
 static bool controlReadPending = false;
 bool displayCelsius = true;
-unsigned long lastDHTReadMs = 0;
 unsigned long displayOnUntilMs = 0;
 unsigned long wdtWakeCount = 0;
 float lastValidTempC = NAN;
@@ -116,54 +109,6 @@ unsigned long pressStartMs = 0;
 
 // fixed width text bounds
 uint16_t textWidth, textHeight;
-
-typedef struct {
-    async_state;
-    int retriesLeft;
-    unsigned long lastAttemptMs;
-    RingbufHandle_t rb;
-    DHT_STATUS initStatus;
-    DHT_STATUS status;
-    esp_err_t rmtError;
-    rmt_channel_t channel;
-    size_t itemSize;
-    rmt_item32_t* items;
-} AsyncDhtState;
-
-AsyncDhtState dhtState = {
-  .initStatus = DHT_UNINITIALIZED,
-  .status = DHT_UNINITIALIZED
-};
-
-void initDhtRmt() {
-    rmt_config_t rmt_rx = {};
-    rmt_rx.rmt_mode = RMT_MODE_RX;
-    rmt_rx.channel = RMT_CHANNEL_2;
-    rmt_rx.gpio_num = (gpio_num_t)DHTPIN;
-    rmt_rx.clk_div = 80; // 1us resolution
-    rmt_rx.mem_block_num = 2;
-
-    rmt_rx.rx_config.filter_en = true;
-    rmt_rx.rx_config.filter_ticks_thresh = 10;  // 10 µs, keeps 50us pulses
-    rmt_rx.rx_config.idle_threshold = 10000;    // 10 ms
-
-    // initialize the channel
-    dhtState.channel = rmt_rx.channel;
-
-    // Apply config and install driver once
-    size_t rcvBufferSize = RMT_MEM_ITEM_NUM * rmt_rx.mem_block_num * sizeof(rmt_item32_t);
-    if (rmt_config(&rmt_rx) != ESP_OK) {
-      dhtState.initStatus = DHT_ERR_RMT_CONFIG;
-    } else if (rmt_driver_install(rmt_rx.channel, rcvBufferSize, 0) != ESP_OK) {
-      dhtState.initStatus = DHT_ERR_DRIVER_INSTALL;
-    } else if (rmt_get_ringbuf_handle(rmt_rx.channel, &dhtState.rb) != ESP_OK || !dhtState.rb) {
-      dhtState.initStatus = DHT_ERR_BUFFER;
-    } else {
-      dhtState.initStatus = DHT_OK;
-    }
-    // initialize the async state
-    async_init(&dhtState);
-}
 
 void IRAM_ATTR encoderISR() {
   // Minimal ISR: use rotary_step_s16 to update encoderPulseCount directly.
@@ -186,9 +131,6 @@ void setup() {
   // Serial.setTxTimeoutMs(0);
   //delay(3000);
   //println("Program started...");
-
-  // Initialize RMT for DHT non-blocking reads once (driver + ringbuffer)
-  initDhtRmt();
 
   // Initialize SPI with explicit pins for ESP32-C3
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
@@ -242,8 +184,6 @@ void setup() {
   //FIXME: should maybe check if relay is already on and needs to be?
   digitalWrite(RELAY_PIN, LOW);
 
-  lastDHTReadMs = now;
-
   // Load persisted target temperature (tenths of °C). Validate range, otherwise set to current measured temp if available.
   prefs.begin("fridge", false);
 
@@ -259,6 +199,10 @@ void setup() {
   // initialize save timestamp to avoid immediate write
   lastSaveMs = now;
 
+  // initialize the thermistor task
+  async_init(&thermState);
+  thermState.expMovingAvg = false;
+
   // ensure display shows current values at startup
   updateDisplay(lastValidTempC, targetTenthsC);
 }
@@ -270,12 +214,7 @@ void show(float temp, int16_t x, int16_t y, uint16_t color) {
   if (isnan(temp)) {
     // error code should print out 7 chars to match expected length
     tft.setCursor(x, y);
-    if (dhtState.initStatus != DHT_OK)
-      tft.printf("I:%04d", dhtState.initStatus);
-    else if (dhtState.rmtError != ESP_OK)
-      tft.printf("R:0x%03x", dhtState.rmtError);
-    else
-      tft.printf("E:%04d", dhtState.status);
+    tft.printf("ERR    ");
   } else {
     char buf[16];
     char symbol = displayCelsius ? 'C' : 'F';
@@ -340,103 +279,48 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   }
 }
 
-async dhtRead(AsyncDhtState* s, unsigned long now, float* temperature, float* humidity) {
+/// @brief  Read the thermistor value.
+/// @param s    The thermistor state.
+/// @param now  The current time, bound to mills().
+/// @return     The async function status.
+async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
     async_begin(s);
-    // if (s->initStatus != DHT_OK)
-    //   async_exit;
 
-    // initialize retry state
-    s->retriesLeft = 3;
-    while (s->retriesLeft > 0) {
-      // try every second so I can monitor the error codes
-      await(now - s->lastAttemptMs >= 1000);
-      s->lastAttemptMs = now;
+    s->sampleCount = 0;
+    s->acc = 0;
 
-      // send the start signal
-      pinMode(DHTPIN, OUTPUT);
-      digitalWrite(DHTPIN, LOW);
-      delayMicroseconds(1100);
-      digitalWrite(DHTPIN, HIGH);
-      delayMicroseconds(30);
-      pinMode(DHTPIN, INPUT);
-      
-      // Start the RMT transaction (non-blocking)
-      s->rmtError = rmt_rx_start(s->channel, true);
-      if (s->rmtError != ESP_OK) {
-          s->retriesLeft--;
-          s->status = DHT_ERR_RMT_START;
-          async_yield; // let caller loop again
-          continue;
-      }
-      // --- Wait for RMT data in ringbuffer ---
-      await((s->items = (rmt_item32_t*)xRingbufferReceive(s->rb, &s->itemSize, 0)) != NULL);
+    while (s->sampleCount < SAMPLES_TOTAL) {
+        // wait between samples
+        await(now - s->lastSampleMs >= SAMPLE_DELAY_MS);
+        s->lastSampleMs = now;
 
-      // Stop RX and parse
-      s->rmtError = rmt_rx_stop(s->channel);
-      if (s->rmtError != ESP_OK) {
-        s->retriesLeft--;
-        async_yield;
-        continue;
-      }
-      if (s->itemSize > 0) {
-        s->status = dht22_parse_items(s->items, s->itemSize / sizeof(rmt_item32_t), temperature, humidity);
-        vRingbufferReturnItem(s->rb, s->items);
-        if (s->status == DHT_OK)
-          async_exit; // success, end coroutine
-      } else {
-        s->status = DHT_ERR_NO_ITEMS;
-        vRingbufferReturnItem(s->rb, s->items);
-      }
-      // failed parse or item extraction, decrement retries
-      s->retriesLeft--;
-      async_yield; // yield before retry
+        int raw = analogRead(ADC_PIN);
+        s->acc += raw;
+        s->sampleCount++;
     }
-    // If we reach here, all retries failed
-    s->status = DHT_ERR_RETRIES_EXHAUSTED;
+
+    // Compute average ADC value
+    {
+      float rawAvg = (float)s->acc / SAMPLES_TOTAL;
+      float v = rawAvg * VREF / ((1 << ADC_BITS) - 1);
+
+      // Compute thermistor resistance
+      float rTherm = R_FIXED * (VREF / v - 1.0f);
+
+      // Beta equation
+      float invT = (1.0f / T0) + (1.0f / BETA) * logf(rTherm / R0);
+      float tempK = 1.0f / invT;
+      float tempC = tempK - 273.15f;
+      if (s->expMovingAvg) {
+        *temp = EMA_ALPHA * tempC  + (1.0f - EMA_ALPHA) * *temp;
+      } else {
+        s->expMovingAvg = true;
+        *temp = tempC;
+      }
+    }
     async_end;
 }
 
-// Return DHT status enum indicating success or failure reason
-DHT_STATUS dht22_parse_items(rmt_item32_t* items, size_t itemsCount,
-                            float* temperature, float* humidity) {
-    if (itemsCount < (DHT22_BITS * 2 + 4)) {
-        return DHT_ERR_NOT_ENOUGH_ITEMS;
-    }
-    uint8_t data[5] = {0};
-
-    // Skip initial response pulses (~80us low + 80us high)
-    size_t idx = 2;
-    for (int bit = 0; bit < DHT22_BITS; bit++, idx += 2) {
-        if (idx + 1 >= itemsCount)
-          return DHT_ERR_NOT_ENOUGH_ITEMS;
-        // Each bit: items[idx] = low (~50us), items[idx+1] = high (26us or 70us)
-        uint32_t high_ticks = items[idx+1].duration0;
-        // Convert ticks to microseconds (assuming 1 tick = 1us if RMT clock set that way)
-        uint32_t high_us = high_ticks;
-
-        int value = (high_us > 40) ? 1 : 0; // threshold ~40us
-        data[bit / 8] <<= 1;
-        data[bit / 8] |= value;
-    }
-    // Verify checksum
-    uint8_t sum = data[0] + data[1] + data[2] + data[3];
-    if (sum != data[4]) {
-        return DHT_ERR_CHECKSUM;
-    }
-    // Humidity: 16 bits
-    uint16_t raw_hum = (data[0] << 8) | data[1];
-    // Temperature: 16 bits, MSB may be sign
-    uint16_t raw_temp = (data[2] << 8) | data[3];
-
-    *humidity = raw_hum / 10.0f;
-    if (raw_temp & 0x8000) {
-        raw_temp &= 0x7FFF;
-        *temperature = -(raw_temp / 10.0f);
-    } else {
-        *temperature = raw_temp / 10.0f;
-    }
-    return DHT_OK;
-}
 
 void controlTemperature(unsigned long now, float currentC, int16_t targetTenths) {
   // If the reading is invalid, skip control to avoid spurious changes.
@@ -548,33 +432,6 @@ void loop() {
     // displayOnUntilMs = now + DISPLAY_ON_AFTER_WAKE_MS;
   }
 
-  // // Start non-blocking DHT read sequence when interval reached, and poll progress
-  // if (now - lastDHTReadMs >= DHT_READ_INTERVAL) {
-  //   startDhtRetries();
-  //   lastDHTReadMs = now;
-  // }
-
-  // // Poll any in-progress non-blocking DHT attempt (RMT); handle initial/control outcomes
-  // {
-  //   float dhtTemp;
-  //   if (dhtRetryActive) {
-  //     if (pollDhtRetries(now, &dhtTemp)) {
-  //       if (!isnan(dhtTemp)) {
-  //         lastValidTempC = dhtTemp;
-  //         if (controlReadPending) {
-  //           controlReadPending = false;
-  //           controlTemperature(now, lastValidTempC, targetTenthsC);
-  //           updateDisplay(lastValidTempC, targetTenthsC);
-  //         }
-  //       } else {
-  //         //println("DHT read failed (retries)");
-  //         // clear pending flags on failure
-  //         controlReadPending = false;
-  //       }
-  //     }
-  //   }
-  // }
-
   // // 5) Control relay periodically using WDT wake count approximation
   // // WDT interval roughly WDT_SLEEP_S seconds per LowPower wake.
   // // Add elapsed seconds since last WDT wake (approx)
@@ -583,27 +440,12 @@ void loop() {
   // if (elapsedS >= CONTROL_INTERVAL_S) {
   //   // Clear accumulated wake count
   //   wdtWakeCount = 0;
-  //   // Start a non-blocking DHT read for control if not already active
-  //   if (!dhtRetryActive && !controlReadPending) {
-  //     startDhtRetries();
-  //     controlReadPending = true;
-  //   }
   // }
 
-  float t, h;
-  if (dhtRead(&dhtState, millis(), &t, &h) == ASYNC_DONE) {
-    // preserve last valid temp in case of read errors, only update when DHT_OK
-    if (dhtState.status == DHT_OK) {
-      lastValidTempC = t;
-      displayDirty = true;
-    }
-    // else {
-    //     // process error?
-    // }
-    async_init(&dhtState); // reset for next loop
-  } //else if (dhtState.status == SOME_ERROR) { displayDirty = true; }
-  else if (dhtState.rmtError != ESP_OK) {
+  float t = lastValidTempC;
+  if (readThermistor(&thermState, now, &t) == ASYNC_DONE) {
     displayDirty = true;
+    lastValidTempC = t;
   }
 
   // Single display update point: update once per loop if any condition requested it.
