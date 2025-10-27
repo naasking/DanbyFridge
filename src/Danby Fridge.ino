@@ -21,7 +21,7 @@ static Preferences prefs;
 #define RELAY_PIN       2   // Safe -- connected to HW-040 relay module
 
 // Rotary encoder -- grouped on the right side
-#define ROTARY_SW       9  // Strapping: rotary encoder button press at start boots into download mode
+#define ROTARY_SW       8  // Strapping
 #define ROTARY_CLK      7  // Safe
 #define ROTARY_DT       6  // Safe
 
@@ -69,7 +69,6 @@ static Preferences prefs;
 
 #define println(text)
 //#define println(text) if (Serial && Serial.isConnected()) Serial.println(text)
-
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1); // RST tied HIGH on module; pass -1 to disable software reset
 
@@ -123,13 +122,18 @@ typedef struct {
     int retriesLeft;
     unsigned long lastAttemptMs;
     RingbufHandle_t rb;
+    DHT_STATUS initStatus;
     DHT_STATUS status;
+    esp_err_t rmtError;
     rmt_channel_t channel;
     size_t itemSize;
     rmt_item32_t* items;
 } AsyncDhtState;
 
-AsyncDhtState dhtState = { .status = DHT_UNINITIALIZED };
+AsyncDhtState dhtState = {
+  .initStatus = DHT_UNINITIALIZED,
+  .status = DHT_UNINITIALIZED
+};
 
 void initDhtRmt() {
     rmt_config_t rmt_rx = {};
@@ -143,16 +147,19 @@ void initDhtRmt() {
     rmt_rx.rx_config.filter_ticks_thresh = 10;  // 10 µs, keeps 50us pulses
     rmt_rx.rx_config.idle_threshold = 10000;    // 10 ms
 
+    // initialize the channel
+    dhtState.channel = rmt_rx.channel;
+
     // Apply config and install driver once
     size_t rcvBufferSize = RMT_MEM_ITEM_NUM * rmt_rx.mem_block_num * sizeof(rmt_item32_t);
     if (rmt_config(&rmt_rx) != ESP_OK) {
-      dhtState.status = DHT_ERR_RMT_CONFIG;
+      dhtState.initStatus = DHT_ERR_RMT_CONFIG;
     } else if (rmt_driver_install(rmt_rx.channel, rcvBufferSize, 0) != ESP_OK) {
-      dhtState.status = DHT_ERR_DRIVER_INSTALL;
+      dhtState.initStatus = DHT_ERR_DRIVER_INSTALL;
     } else if (rmt_get_ringbuf_handle(rmt_rx.channel, &dhtState.rb) != ESP_OK || !dhtState.rb) {
-      dhtState.status = DHT_ERR_BUFFER;
+      dhtState.initStatus = DHT_ERR_BUFFER;
     } else {
-      dhtState.status = DHT_OK;
+      dhtState.initStatus = DHT_OK;
     }
     // initialize the async state
     async_init(&dhtState);
@@ -263,7 +270,12 @@ void show(float temp, int16_t x, int16_t y, uint16_t color) {
   if (isnan(temp)) {
     // error code should print out 7 chars to match expected length
     tft.setCursor(x, y);
-    tft.printf("E:%04d", dhtState.status);
+    if (dhtState.initStatus != DHT_OK)
+      tft.printf("I:%04d", dhtState.initStatus);
+    else if (dhtState.rmtError != ESP_OK)
+      tft.printf("R:0x%03x", dhtState.rmtError);
+    else
+      tft.printf("E:%04d", dhtState.status);
   } else {
     char buf[16];
     char symbol = displayCelsius ? 'C' : 'F';
@@ -292,7 +304,7 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   show(tgtC, 0, 50, lightBlue);
 
   // Current temperature (left) - print fixed-width numeric + unit to avoid residual chars
-  show(currentC, 0, 140, ST77XX_WHITE);
+  show(currentC, 0, 120, ST77XX_WHITE);
 
   // Compressor running indicator (snowflake) between the values
   // Draw a simple snowflake icon centered at (80, 20)
@@ -330,6 +342,9 @@ void updateDisplay(float currentC, int16_t targetTenths) {
 
 async dhtRead(AsyncDhtState* s, unsigned long now, float* temperature, float* humidity) {
     async_begin(s);
+    // if (s->initStatus != DHT_OK)
+    //   async_exit;
+
     // initialize retry state
     s->retriesLeft = 3;
     while (s->retriesLeft > 0) {
@@ -337,8 +352,17 @@ async dhtRead(AsyncDhtState* s, unsigned long now, float* temperature, float* hu
       await(now - s->lastAttemptMs >= 1000);
       s->lastAttemptMs = now;
 
+      // send the start signal
+      pinMode(DHTPIN, OUTPUT);
+      digitalWrite(DHTPIN, LOW);
+      delayMicroseconds(1100);
+      digitalWrite(DHTPIN, HIGH);
+      delayMicroseconds(30);
+      pinMode(DHTPIN, INPUT);
+      
       // Start the RMT transaction (non-blocking)
-      if (rmt_rx_start(s->channel, true) != ESP_OK) {
+      s->rmtError = rmt_rx_start(s->channel, true);
+      if (s->rmtError != ESP_OK) {
           s->retriesLeft--;
           s->status = DHT_ERR_RMT_START;
           async_yield; // let caller loop again
@@ -348,8 +372,12 @@ async dhtRead(AsyncDhtState* s, unsigned long now, float* temperature, float* hu
       await((s->items = (rmt_item32_t*)xRingbufferReceive(s->rb, &s->itemSize, 0)) != NULL);
 
       // Stop RX and parse
-      rmt_rx_stop(s->channel);
-
+      s->rmtError = rmt_rx_stop(s->channel);
+      if (s->rmtError != ESP_OK) {
+        s->retriesLeft--;
+        async_yield;
+        continue;
+      }
       if (s->itemSize > 0) {
         s->status = dht22_parse_items(s->items, s->itemSize / sizeof(rmt_item32_t), temperature, humidity);
         vRingbufferReturnItem(s->rb, s->items);
@@ -573,8 +601,10 @@ void loop() {
     //     // process error?
     // }
     async_init(&dhtState); // reset for next loop
-  }// else if (dhtState.status == SOME_ERROR) { displayDirty = true; }
-
+  } //else if (dhtState.status == SOME_ERROR) { displayDirty = true; }
+  else if (dhtState.rmtError != ESP_OK) {
+    displayDirty = true;
+  }
 
   // Single display update point: update once per loop if any condition requested it.
   if (displayDirty) {
