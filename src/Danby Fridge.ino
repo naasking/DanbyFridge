@@ -53,7 +53,7 @@ static Preferences prefs;
 
 #define DISPLAY_UPDATE_INTERVAL 200
 #define CONTROL_INTERVAL 10000
-#define HYSTERESIS_TENTHS 5      // 0.5°C hysteresis
+#define HYSTERESIS_TENTHS 3      // 0.2°C hysteresis
 #define ENCODER_STEP_TENTHS 1    // 0.1°C per encoder step
 #define ENCODER_PULSES_PER_STEP 2 // quadrature pulses per mechanical detent (tune if needed)
 #define BUTTON_DEBOUNCE_MS 50
@@ -246,11 +246,13 @@ void updateDisplay(float currentC, int16_t targetTenths) {
   show(tgtC, 0, 50, lightBlue);
 
   // Current temperature (left) - print fixed-width numeric + unit to avoid residual chars
-  show(currentC, 0, 120, ST77XX_WHITE);
+  show(currentC, 0, 130, ST77XX_WHITE);
 
   // Compressor running indicator (snowflake) between the values
-  // Draw a simple snowflake icon centered at (80, 20)
+  // Draw a simple snowflake icon centered at (40, 80)
   int cx = 40, cy = 80, size = 10;
+  //tft.fillRect(0, cy - size - 1, 80, size + 1, ST77XX_RED);
+  tft.fillRect(0, cy - size, 80, 2*size, ST77XX_BLACK);
   if (relayOn) {
     uint16_t color = lightBlue;
     tft.drawPixel(cx, cy, color);
@@ -313,7 +315,7 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
       // Beta equation
       float invT = (1.0f / T0) + (1.0f / BETA) * logf(rTherm / R0);
       float tempK = 1.0f / invT;
-      float tempC = tempK - 273.15f;
+      float tempC = tempK - 273.15f - 2.5f;
       _printf("Temp: %f", tempC);
       if (s->expMovingAvg) {
         *temp = EMA_ALPHA * tempC  + (1.0f - EMA_ALPHA) * *temp;
@@ -325,30 +327,24 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
     async_end;
 }
 
-
+/// @brief Relay control function
 void controlTemperature(unsigned long now, float currentC, int16_t targetTenths) {
   // If the reading is invalid, skip control to avoid spurious changes.
-  if (isnan(currentC))
+  if (isnan(currentC) || !relayOn && (now - lastRelayOffMs) >= COMPRESSOR_MIN_OFF_MS)
     return;
 
   int16_t currentTenths = (int16_t)round(currentC * 10.0);
 
-  // Need to turn ON when current is below target minus hysteresis.
-  if (currentTenths <= (targetTenths - HYSTERESIS_TENTHS)) {
+  // Need to turn ON when current is below target plus hysteresis.
+  if (!relayOn && currentTenths >= (targetTenths + HYSTERESIS_TENTHS)) {
     // Only allow starting compressor if it is currently off and the minimum off time has elapsed.
-    if (!relayOn) {
-      if ((now - lastRelayOffMs) >= COMPRESSOR_MIN_OFF_MS) {
-        digitalWrite(RELAY_PIN, HIGH);
-        relayOn = true;
-      }
-    }
-  } else if (currentTenths >= (targetTenths + HYSTERESIS_TENTHS)) {
-    // Need to turn OFF when current is above target plus hysteresis.
-    if (relayOn) {
-      digitalWrite(RELAY_PIN, LOW);
-      relayOn = false;
-      lastRelayOffMs = now;
-    }
+    digitalWrite(RELAY_PIN, HIGH);
+    relayOn = true;
+  } else if (relayOn && currentTenths <= (targetTenths - HYSTERESIS_TENTHS)) {
+    // Need to turn OFF when current is below target minus hysteresis.
+    digitalWrite(RELAY_PIN, LOW);
+    relayOn = false;
+    lastRelayOffMs = now;
   }
 }
 
@@ -436,22 +432,20 @@ void loop() {
     // displayOnUntilMs = now + DISPLAY_ON_AFTER_WAKE_MS;
   }
 
-  // // 5) Control relay periodically using WDT wake count approximation
-  // // WDT interval roughly WDT_SLEEP_S seconds per LowPower wake.
-  // // Add elapsed seconds since last WDT wake (approx)
-  // // Use wdtWakeCount as a coarse timer: multiply by WDT_SLEEP_S
-  // unsigned long elapsedS = wdtWakeCount * WDT_SLEEP_S;
-  // if (elapsedS >= CONTROL_INTERVAL_S) {
-  //   // Clear accumulated wake count
-  //   wdtWakeCount = 0;
-  // }
-
+  // measure the current temperature
   float t = lastValidTempC;
   if (readThermistor(&thermState, now, &t) == ASYNC_DONE) {
     displayDirty = isnan(lastValidTempC) || abs(t - lastValidTempC) > 0.1f;
     lastValidTempC = t;
     async_init(&thermState);
   }
+  
+  // relay control based on temperature -- it should monitor
+  // temperature regardless of whether something has changed, it should only depend
+  // on the amount of time the relay has been off
+  //if (displayDirty || targetDirty) {
+    controlTemperature(now, lastValidTempC, targetTenthsC);
+  //}
 
   // Single display update point: update once per loop if any condition requested it.
   if (displayDirty) {
