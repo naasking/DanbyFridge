@@ -15,20 +15,20 @@
 static Preferences prefs;
 
 // === ESP32-C3 Super mini Pin Mapping ===
-#define ADC_PIN         10  // Safe -- FIXME: not an ADC pin so will have to move
-#define RELAY_PIN       2   // Safe -- connected to HW-040 relay module
+#define ADC_PIN         0  // Safe -- FIXME: not an ADC pin so will have to move
+#define RELAY_PIN       1  // Safe -- connected to HW-040 relay module
 
 // Rotary encoder -- grouped on the right side
-#define ROTARY_SW       8  // Strapping
-#define ROTARY_CLK      7  // Safe
-#define ROTARY_DT       6  // Safe
+#define ROTARY_SW       2  // Strapping: should default high
+#define ROTARY_CLK      3  // Safe
+#define ROTARY_DT       4  // Safe
 
 // TFT SPI -- grouped on the left side
-#define TFT_DC          0   // Safe
-#define BACKLIGHT_PIN   1   // Strapping: defaults HIGH
-#define TFT_CS          3   // Safe
-#define TFT_MOSI        4   // Safe (SDA on TFT7735)
-#define TFT_SCK         5   // Safe (SCL on TFT7735)
+#define TFT_DC          6   // Safe
+#define BACKLIGHT_PIN   5   // Safe
+#define TFT_CS          7   // Safe
+#define TFT_MOSI        8   // Strapping if GPIO2 is low (SDA)
+#define TFT_SCK         10  // Safe (SCL)
 #define TFT_MISO       -1   // Not used
 
 // === Notes ===
@@ -40,8 +40,10 @@ static Preferences prefs;
 #define SAMPLES_TOTAL   64
 #define SAMPLE_DELAY_MS 10
 
-// Thermistor constants -- probably use a 100K NTC 3950
-#define R_FIXED 100000.0f   // 100kΩ reference resistor
+// Thermistor constants -- use a 100K NTC 3950
+// #define R_FIXED 94200.0f    // ~100kΩ reference resistor
+// #define R0      125000.0f   // 100kΩ at 25 °C
+#define R_FIXED 100000.0f    // ~100kΩ reference resistor
 #define R0      100000.0f   // 100kΩ at 25 °C
 #define BETA    3950.0f
 #define T0      298.15f     // 25 °C in Kelvin
@@ -53,7 +55,7 @@ static Preferences prefs;
 #define CONTROL_INTERVAL 10000
 #define HYSTERESIS_TENTHS 5      // 0.5°C hysteresis
 #define ENCODER_STEP_TENTHS 1    // 0.1°C per encoder step
-#define ENCODER_PULSES_PER_STEP 1 // quadrature pulses per mechanical detent (tune if needed)
+#define ENCODER_PULSES_PER_STEP 2 // quadrature pulses per mechanical detent (tune if needed)
 #define BUTTON_DEBOUNCE_MS 50
 #define LONG_PRESS_MS 1000 // ms for long press to toggle units
 
@@ -63,11 +65,12 @@ static Preferences prefs;
 // Power management
 #define WDT_SLEEP_S 8            // WDT sleep interval in seconds (LowPower SLEEP_8S)
 #define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
-#define DISPLAY_ON_AFTER_WAKE_MS 3000 // keep display on for some time after wake for user feedback
+#define DISPLAY_ON_AFTER_WAKE_MS 10000 // keep display on for some time after wake for user feedback
 #define COMPRESSOR_MIN_OFF_MS (4UL * 60UL * 1000UL) // 4 minutes minimum off time for compressor starter
 
-#define println(text)
-//#define println(text) if (Serial && Serial.isConnected()) Serial.println(text)
+//#define println(text)
+#define println(text) if (Serial && Serial.isConnected()) Serial.println(text)
+#define _printf(fmt, arg0) if (Serial && Serial.isConnected()) Serial.printf(fmt, arg0)
 
 // RST tied HIGH on module; pass -1 to disable software reset
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1);
@@ -127,10 +130,10 @@ void IRAM_ATTR wakeISR() {
 
 void setup() {
   //Serial.begin(115200, SERIAL_8N1, -1);
-  // Serial.begin(115200);
-  // Serial.setTxTimeoutMs(0);
+  Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);
   //delay(3000);
-  //println("Program started...");
+  println("Program started...");
 
   // Initialize SPI with explicit pins for ESP32-C3
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
@@ -311,6 +314,7 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
       float invT = (1.0f / T0) + (1.0f / BETA) * logf(rTherm / R0);
       float tempK = 1.0f / invT;
       float tempC = tempK - 273.15f;
+      _printf("Temp: %f", tempC);
       if (s->expMovingAvg) {
         *temp = EMA_ALPHA * tempC  + (1.0f - EMA_ALPHA) * *temp;
       } else {
@@ -444,8 +448,9 @@ void loop() {
 
   float t = lastValidTempC;
   if (readThermistor(&thermState, now, &t) == ASYNC_DONE) {
-    displayDirty = true;
+    displayDirty = isnan(lastValidTempC) || abs(t - lastValidTempC) > 0.1f;
     lastValidTempC = t;
+    async_init(&thermState);
   }
 
   // Single display update point: update once per loop if any condition requested it.
