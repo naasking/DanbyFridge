@@ -68,10 +68,12 @@ static Preferences prefs;
 #define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
 #define DISPLAY_ON_AFTER_WAKE_MS 10000 // keep display on for some time after wake for user feedback
 #define COMPRESSOR_MIN_OFF_MS (4UL * 60UL * 1000UL) // 4 minutes minimum off time for compressor starter
+#define THERM_START_DELAY 5000
 
-//#define println(text)
-#define println(text) if (Serial && Serial.isConnected()) Serial.println(text)
-#define _printf(fmt, arg0) if (Serial && Serial.isConnected()) Serial.printf(fmt, arg0)
+#define _println(text)
+#define _printf(fmt, arg0)
+//#define _println(text) if (Serial && Serial.isConnected()) Serial._println(text)
+//#define _printf(fmt, arg0) if (Serial && Serial.isConnected()) Serial.printf(fmt, arg0)
 
 // RST tied HIGH on module; pass -1 to disable software reset
 Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1);
@@ -112,6 +114,10 @@ bool lastButtonState = HIGH;
 unsigned long lastButtonMs = 0;
 unsigned long pressStartMs = 0;
 
+/// @brief Flag indicating that the target temperature has changed.
+/// @remarks Must be a global because changes could happen before the last save window elapses
+bool targetDirty = false;
+
 // fixed width text bounds
 uint16_t textWidth, textHeight;
 
@@ -135,7 +141,7 @@ void setup() {
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
   //delay(3000);
-  println("Program started...");
+  _println("Program started...");
 
   // Initialize SPI with explicit pins for ESP32-C3
   SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
@@ -210,6 +216,9 @@ void setup() {
   async_init(&thermState);
   thermState.expMovingAvg = false;
 
+  // let system settle for THERM_START_DELAY before reading
+  thermState.lastSampleMs = now + THERM_START_DELAY;
+
   // ensure display shows current values at startup
   updateDisplay(lastValidTempC, targetTenthsC);
 }
@@ -221,7 +230,7 @@ void show(float temp, int16_t x, int16_t y, uint16_t color) {
   if (isnan(temp)) {
     // error code should print out 7 chars to match expected length
     tft.setCursor(x, y);
-    tft.printf("ERR    ");
+    tft.printf(" - - - - - ");
   } else {
     char buf[16];
     char symbol = displayCelsius ? 'C' : 'F';
@@ -242,7 +251,7 @@ void show(float temp, int16_t x, int16_t y, uint16_t color) {
 
 void updateDisplay(float currentC, int16_t targetTenths) {
   // Full-screen redraw but use color to distinguish current (white) and target (light blue).
-  //println("updating display...");
+  //_println("updating display...");
 
   // Target temperature (right) in light blue - also fixed-width
   uint16_t lightBlue = tft.color565(120, 120, 255); // light blue (RGB: 120,120,255)
@@ -300,18 +309,20 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
     s->vRef = 0;
 
     while (s->sampleCount < SAMPLES_TOTAL) {
-        // wait between samples
-        await(now - s->lastSampleMs >= SAMPLE_DELAY_MS);
+        // wait between samples for SAMPLE_DELAY_MS
+        // also wait at boot for THERM_START_DELAY to start taking measurements
+        // to let the system settle
+        await(now - s->lastSampleMs < THERM_START_DELAY && now - s->lastSampleMs >= SAMPLE_DELAY_MS);
         s->lastSampleMs = now;
 
         // Read thermistor node
         (void)analogRead(THERM_PIN);   // throw-away after mux switch
-        delayMicroseconds(200);
+        delayMicroseconds(300);
         s->temp += analogRead(THERM_PIN);
         
         // Read 3.3V sense node
         (void)analogRead(VREF_PIN);    // throw-away after mux switch
-        delayMicroseconds(200);
+        delayMicroseconds(300);
         s->vRef += analogRead(VREF_PIN);
         s->sampleCount++;
     }
@@ -361,7 +372,6 @@ void controlTemperature(unsigned long now, float currentC, int16_t targetTenths)
 }
 
 void loop() {
-  bool targetDirty = false;
   bool displayDirty = false;
   unsigned long now = millis();
   int16_t pulses = 0;
@@ -381,7 +391,7 @@ void loop() {
 
       if (steps != 0) {
         int16_t newTarget = targetTenthsC + (int16_t)(steps * ENCODER_STEP_TENTHS);
-        if (newTarget < -400) newTarget = -400;
+        if (newTarget < -100) newTarget = -100;
         if (newTarget > 500)  newTarget = 500;
         if (newTarget != targetTenthsC) {
           targetTenthsC = newTarget;
@@ -390,15 +400,6 @@ void loop() {
         }
       }
     }
-  }
-
-  // Persist target temperature occasionally (rate-limited to SAVE_INTERVAL_MS)
-  if (targetDirty && (now - lastSaveMs >= SAVE_INTERVAL_MS)) {
-    int16_t toSave = targetTenthsC; // local copy
-    println("Save target C");
-    // Preferences is already opened in setup and kept open; just write the value
-    prefs.putShort("targetC", toSave);
-    lastSaveMs = now;
   }
 
   // button press to wake board from sleep and turn on screen
@@ -450,6 +451,16 @@ void loop() {
     displayDirty = isnan(lastValidTempC) || abs(t - lastValidTempC) > 0.1f;
     lastValidTempC = t;
     async_init(&thermState);
+  }
+  
+  // Persist target temperature occasionally (rate-limited to SAVE_INTERVAL_MS)
+  if (targetDirty && (now - lastSaveMs >= SAVE_INTERVAL_MS)) {
+    int16_t toSave = targetTenthsC; // local copy
+    _println("Save target C");
+    // Preferences is already opened in setup and kept open; just write the value
+    prefs.putShort("targetC", toSave);
+    lastSaveMs = now;
+    targetDirty = false;   // reset dirty state
   }
   
   // relay control based on temperature -- it should monitor
