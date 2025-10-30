@@ -15,8 +15,9 @@
 static Preferences prefs;
 
 // === ESP32-C3 Super mini Pin Mapping ===
-#define ADC_PIN         0  // Safe -- FIXME: not an ADC pin so will have to move
-#define RELAY_PIN       1  // Safe -- connected to HW-040 relay module
+#define THERM_PIN       0  // Safe -- FIXME: not an ADC pin so will have to move
+#define RELAY_PIN       21 // Safe -- connected to HW-040 relay module
+#define VREF_PIN        1  // Safe
 
 // Rotary encoder -- grouped on the right side
 #define ROTARY_SW       2  // Strapping: should default high
@@ -35,8 +36,8 @@ static Preferences prefs;
 // - All pins are 3.3V only (no 5V tolerance).
 
 // ADC config
-#define VREF            3.3f
-#define ADC_BITS        12
+// measured 2.4V on a 3.3V rail as the reference
+#define VREF_K          2.41f/3.3f
 #define SAMPLES_TOTAL   64
 #define SAMPLE_DELAY_MS 10
 
@@ -79,9 +80,10 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, -1);
 typedef struct {
     async_state;                // the async state
     int sampleCount;            // the number of samples taken
-    uint32_t acc;               // accumulated temperature reading
+    uint32_t temp;              // accumulated temperature reading
     unsigned long lastSampleMs; // last time a sample was taken
     bool expMovingAvg;          // smoothing is enabled
+    float vRef;                 // voltage divider reference
 } ThermistorState;
 
 ThermistorState thermState;
@@ -164,6 +166,8 @@ void setup() {
   tft.enableDisplay(true);
   tft.fillScreen(ST7735_BLACK);
 
+  pinMode(THERM_PIN, INPUT);
+  pinMode(VREF_PIN, INPUT);
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(ROTARY_CLK, INPUT_PULLUP);
   pinMode(ROTARY_DT, INPUT_PULLUP);
@@ -292,30 +296,38 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
     async_begin(s);
 
     s->sampleCount = 0;
-    s->acc = 0;
+    s->temp = 0;
+    s->vRef = 0;
 
     while (s->sampleCount < SAMPLES_TOTAL) {
         // wait between samples
         await(now - s->lastSampleMs >= SAMPLE_DELAY_MS);
         s->lastSampleMs = now;
 
-        int raw = analogRead(ADC_PIN);
-        s->acc += raw;
+        // Read thermistor node
+        (void)analogRead(THERM_PIN);   // throw-away after mux switch
+        delayMicroseconds(200);
+        s->temp += analogRead(THERM_PIN);
+        
+        // Read 3.3V sense node
+        (void)analogRead(VREF_PIN);    // throw-away after mux switch
+        delayMicroseconds(200);
+        s->vRef += analogRead(VREF_PIN);
         s->sampleCount++;
     }
 
-    // Compute average ADC value
+    // Compute ratiometric average ADC value
     {
-      float rawAvg = (float)s->acc / SAMPLES_TOTAL;
-      float v = rawAvg * VREF / ((1 << ADC_BITS) - 1);
+      float vTemp = (float)s->temp / SAMPLES_TOTAL;
+      float vRef = (float)s->vRef / SAMPLES_TOTAL;
 
       // Compute thermistor resistance
-      float rTherm = R_FIXED * (VREF / v - 1.0f);
+      float rTherm = R_FIXED * (vRef / (vTemp * VREF_K) - 1.0f);
 
       // Beta equation
       float invT = (1.0f / T0) + (1.0f / BETA) * logf(rTherm / R0);
       float tempK = 1.0f / invT;
-      float tempC = tempK - 273.15f - 2.5f;
+      float tempC = tempK - 273.15f; 
       _printf("Temp: %f", tempC);
       if (s->expMovingAvg) {
         *temp = EMA_ALPHA * tempC  + (1.0f - EMA_ALPHA) * *temp;
