@@ -117,6 +117,7 @@ unsigned long pressStartMs = 0;
 /// @brief Flag indicating that the target temperature has changed.
 /// @remarks Must be a global because changes could happen before the last save window elapses
 bool targetDirty = false;
+bool unitsDirty = false; // true when the units selection needs persisting
 
 // fixed width text bounds
 uint16_t textWidth, textHeight;
@@ -205,6 +206,9 @@ void setup() {
   targetTenthsC = saved >= -400 && saved <= 500
     ? saved
     : 250;  // default 25.0C
+
+  // Load persisted units selection (true = Celsius). Default to Celsius if missing.
+  displayCelsius = prefs.getBool("unitsC", true);
 
   // keep Preferences open for the lifetime of the program (do not end here)
   // prefs.end(); // removed to keep prefs active
@@ -415,6 +419,7 @@ void loop() {
     if ((now - pressStartMs) >= LONG_PRESS_MS) {
       // Long press: toggle units
       displayCelsius = !displayCelsius;
+      unitsDirty = true;            // mark units changed so we persist it
       pressStartMs = now; // reset the hold period
       displayDirty = true;
     }
@@ -454,13 +459,17 @@ void loop() {
   }
   
   // Persist target temperature occasionally (rate-limited to SAVE_INTERVAL_MS)
-  if (targetDirty && (now - lastSaveMs >= SAVE_INTERVAL_MS)) {
-    int16_t toSave = targetTenthsC; // local copy
-    _println("Save target C");
-    // Preferences is already opened in setup and kept open; just write the value
+  if ((targetDirty || unitsDirty) && (now - lastSaveMs >= SAVE_INTERVAL_MS)) {
+    // Local copies to avoid races with ISRs/other logic
+    int16_t toSave = targetTenthsC;
+    bool unitsToSave = displayCelsius;
+    _println("Save settings");
+    // Preferences is already opened in setup and kept open; just write the values
     prefs.putShort("targetC", toSave);
+    prefs.putBool("unitsC", unitsToSave);
     lastSaveMs = now;
     targetDirty = false;   // reset dirty state
+    unitsDirty = false;
   }
   
   // relay control based on temperature -- it should monitor
