@@ -15,9 +15,9 @@
 static Preferences prefs;
 
 // === ESP32-C3 Super mini Pin Mapping ===
-#define THERM_PIN       0  // Safe -- FIXME: not an ADC pin so will have to move
+#define THERM_PIN       0  // Safe -- connected to thermistor
 #define RELAY_PIN       21 // Safe -- connected to HW-040 relay module
-#define VREF_PIN        1  // Safe
+#define VREF_PIN        1  // Safe -- connected to voltage reference to correct for voltage dips
 
 // Rotary encoder -- grouped on the right side
 #define ROTARY_SW       2  // Strapping: should default high
@@ -25,9 +25,9 @@ static Preferences prefs;
 #define ROTARY_DT       4  // Safe
 
 // TFT SPI -- grouped on the left side
-#define TFT_DC          6   // Safe
+#define TFT_DC          7   // Safe
 #define BACKLIGHT_PIN   5   // Safe
-#define TFT_CS          7   // Safe
+#define TFT_CS          6   // Safe
 #define TFT_MOSI        8   // Strapping if GPIO2 is low (SDA)
 #define TFT_SCK         10  // Safe (SCL)
 #define TFT_MISO       -1   // Not used
@@ -68,7 +68,7 @@ static Preferences prefs;
 #define CONTROL_INTERVAL_S 10    // control interval in seconds (approximately)
 #define DISPLAY_ON_AFTER_WAKE_MS 10000 // keep display on for some time after wake for user feedback
 #define COMPRESSOR_MIN_OFF_MS (4UL * 60UL * 1000UL) // 4 minutes minimum off time for compressor starter
-#define THERM_START_DELAY 5000
+#define THERM_START_DELAY 10000
 
 #define _println(text)
 #define _printf(fmt, arg0)
@@ -105,9 +105,8 @@ unsigned long lastSaveMs = 0;
 bool relayOn = false;
 unsigned long lastRelayOffMs = 0;
 
-static bool controlReadPending = false;
 bool displayCelsius = true;
-unsigned long displayOnUntilMs = 0;
+unsigned long displayOnMs = 0;
 unsigned long wdtWakeCount = 0;
 float lastValidTempC = NAN;
 bool lastButtonState = HIGH;
@@ -185,7 +184,7 @@ void setup() {
   digitalWrite(BACKLIGHT_PIN, HIGH);
 
   unsigned long now = millis();
-  displayOnUntilMs = now + DISPLAY_ON_AFTER_WAKE_MS;
+  displayOnMs = now + DISPLAY_ON_AFTER_WAKE_MS;
 
   attachInterrupt(digitalPinToInterrupt(ROTARY_CLK), encoderISR, CHANGE);
   // Also attach to DT so the ISR runs on changes of either channel (better capture on fast/cheap encoders)
@@ -316,7 +315,8 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
         // wait between samples for SAMPLE_DELAY_MS
         // also wait at boot for THERM_START_DELAY to start taking measurements
         // to let the system settle
-        await(now - s->lastSampleMs < THERM_START_DELAY && now - s->lastSampleMs >= SAMPLE_DELAY_MS);
+        await(now - s->lastSampleMs < THERM_START_DELAY
+           && now - s->lastSampleMs >= SAMPLE_DELAY_MS);
         s->lastSampleMs = now;
 
         // Read thermistor node
@@ -331,7 +331,7 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
         s->sampleCount++;
     }
 
-    // Compute ratiometric average ADC value
+    // Compute ratiometric average ADC value using a voltage reference on another ADC pin
     {
       float vTemp = (float)s->temp / SAMPLES_TOTAL;
       float vRef = (float)s->vRef / SAMPLES_TOTAL;
@@ -342,7 +342,7 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
       // Beta equation
       float invT = (1.0f / T0) + (1.0f / BETA) * logf(rTherm / R0);
       float tempK = 1.0f / invT;
-      float tempC = tempK - 273.15f; 
+      float tempC = tempK - 273.15f + 0.8f; // ~0.8 degC offset measured by probe
       _printf("Temp: %f", tempC);
       if (s->expMovingAvg) {
         *temp = EMA_ALPHA * tempC  + (1.0f - EMA_ALPHA) * *temp;
@@ -356,13 +356,13 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
 
 /// @brief Relay control function
 void controlTemperature(unsigned long now, float currentC, int16_t targetTenths) {
-  // If the reading is invalid, skip control to avoid spurious changes.
-  if (isnan(currentC) || !relayOn && (now - lastRelayOffMs) >= COMPRESSOR_MIN_OFF_MS)
+  // Skip if the reading is invalid or if the relay is off and it was on is before the min cool-off
+  if (isnan(currentC) || !relayOn && (now - lastRelayOffMs) < COMPRESSOR_MIN_OFF_MS)
     return;
 
   int16_t currentTenths = (int16_t)round(currentC * 10.0);
 
-  // Need to turn ON when current is below target plus hysteresis.
+  // Need to turn ON when current is above target plus hysteresis.
   if (!relayOn && currentTenths >= (targetTenths + HYSTERESIS_TENTHS)) {
     // Only allow starting compressor if it is currently off and the minimum off time has elapsed.
     digitalWrite(RELAY_PIN, HIGH);
@@ -431,14 +431,14 @@ void loop() {
   lastButtonState = sw;
   
   // Keep display on for a short period after any updates for user feedback
-  bool displayOn = displayOnUntilMs - now < DISPLAY_ON_AFTER_WAKE_MS;
+  bool displayOn = displayOnMs - now < DISPLAY_ON_AFTER_WAKE_MS;
   digitalWrite(BACKLIGHT_PIN, displayOn ? HIGH : LOW);
   
   //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and timer (approx WDT)
   //  Only sleep if no recent activity and display not required.
   bool idle = (pulses == 0) && !targetDirty && !displayDirty;
   if (!idle) {
-    displayOnUntilMs = now + DISPLAY_ON_AFTER_WAKE_MS;
+    displayOnMs = now + DISPLAY_ON_AFTER_WAKE_MS;
   } else if (!displayOn) {
     // // Configure timer wake for approximately WDT_SLEEP_S seconds (esp_light_sleep)
     // esp_sleep_enable_timer_wakeup((uint64_t)WDT_SLEEP_S * 1000000ULL);
@@ -447,7 +447,7 @@ void loop() {
     // Woke up (either via timer or external INT)
     // wdtWakeCount++;
     // keep display on briefly after wake for feedback
-    // displayOnUntilMs = now + DISPLAY_ON_AFTER_WAKE_MS;
+    // displayOnMs = now + DISPLAY_ON_AFTER_WAKE_MS;
   }
 
   // measure the current temperature
