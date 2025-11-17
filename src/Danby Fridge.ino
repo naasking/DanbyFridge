@@ -28,8 +28,8 @@ static Preferences prefs;
 #define TFT_DC          7   // Safe
 #define BACKLIGHT_PIN   5   // Safe
 #define TFT_CS          6   // Safe
-#define TFT_MOSI        8   // Strapping if GPIO2 is low (SDA)
-#define TFT_SCK         10  // Safe (SCL)
+#define TFT_MOSI        8   // SDA-Strapping if GPIO2 is low
+#define TFT_SCK         10  // SCL-Safe
 #define TFT_MISO       -1   // Not used
 
 // === Notes ===
@@ -431,7 +431,12 @@ void loop() {
   lastButtonState = sw;
   
   // Keep display on for a short period after any updates for user feedback
-  bool displayOn = displayOnMs - now < DISPLAY_ON_AFTER_WAKE_MS;
+  // This MUST be a <= comparison as two subsequent iterations might have the same `now` value.
+  // While pulses are being registered, this keeps pushing `displayOnMs` forwards and the subsequent
+  // loop iterations pull the pin LOW and eventually pushes it HIGH once no pulses are recorded and
+  // `now` advances slightly.  This ends up looking like a PWM signal and the screen noticeably
+  // dims as a result.
+  bool displayOn = (displayOnMs - now) <= (unsigned long)DISPLAY_ON_AFTER_WAKE_MS;
   digitalWrite(BACKLIGHT_PIN, displayOn ? HIGH : LOW);
   
   //  Put MCU to low-power sleep if idle: wake sources are external INT (encoder/button) and timer (approx WDT)
