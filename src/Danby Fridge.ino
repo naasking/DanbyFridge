@@ -137,6 +137,10 @@ void IRAM_ATTR wakeISR() {
 }
 
 void setup() {
+  // set this LOW immediately so the compressor doesn't immediately turn on
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+
   //Serial.begin(115200, SERIAL_8N1, -1);
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);
@@ -174,7 +178,6 @@ void setup() {
 
   pinMode(THERM_PIN, INPUT);
   pinMode(VREF_PIN, INPUT);
-  pinMode(RELAY_PIN, OUTPUT);
   pinMode(ROTARY_CLK, INPUT_PULLUP);
   pinMode(ROTARY_DT, INPUT_PULLUP);
   pinMode(ROTARY_SW, INPUT_PULLUP);
@@ -342,7 +345,7 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
       // Beta equation
       float invT = (1.0f / T0) + (1.0f / BETA) * logf(rTherm / R0);
       float tempK = 1.0f / invT;
-      float tempC = tempK - 273.15f + 0.8f; // ~0.8 degC offset measured by probe
+      float tempC = tempK - 273.15f - 1.7f; // 1.7C bias as measured by ice slurry
       _printf("Temp: %f", tempC);
       if (s->expMovingAvg) {
         *temp = EMA_ALPHA * tempC  + (1.0f - EMA_ALPHA) * *temp;
@@ -355,10 +358,11 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
 }
 
 /// @brief Relay control function
-void controlTemperature(unsigned long now, float currentC, int16_t targetTenths) {
+/// @returns True if the comrpessor has changed state, false otherwise.
+bool controlTemperature(unsigned long now, float currentC, int16_t targetTenths) {
   // Skip if the reading is invalid or if the relay is off and it was on is before the min cool-off
   if (isnan(currentC) || !relayOn && (now - lastRelayOffMs) < COMPRESSOR_MIN_OFF_MS)
-    return;
+    return false;
 
   int16_t currentTenths = (int16_t)round(currentC * 10.0);
 
@@ -367,12 +371,15 @@ void controlTemperature(unsigned long now, float currentC, int16_t targetTenths)
     // Only allow starting compressor if it is currently off and the minimum off time has elapsed.
     digitalWrite(RELAY_PIN, HIGH);
     relayOn = true;
+    return true;
   } else if (relayOn && currentTenths <= (targetTenths - HYSTERESIS_TENTHS)) {
     // Need to turn OFF when current is below target minus hysteresis.
     digitalWrite(RELAY_PIN, LOW);
     relayOn = false;
     lastRelayOffMs = now;
+    return true;
   }
+  return false;
 }
 
 void loop() {
@@ -433,7 +440,7 @@ void loop() {
   // Keep display on for a short period after any updates for user feedback
   // This MUST be a <= comparison as two subsequent iterations might have the same `now` value.
   // While pulses are being registered, this keeps pushing `displayOnMs` forwards and the subsequent
-  // loop iterations pull the pin LOW and eventually pushes it HIGH once no pulses are recorded and
+  // loop iterations pull the pin LOW, eventually pushing it HIGH once no pulses are recorded and
   // `now` advances slightly.  This ends up looking like a PWM signal and the screen noticeably
   // dims as a result.
   bool displayOn = (displayOnMs - now) <= (unsigned long)DISPLAY_ON_AFTER_WAKE_MS;
@@ -477,12 +484,10 @@ void loop() {
     unitsDirty = false;
   }
   
-  // relay control based on temperature -- it should monitor
-  // temperature regardless of whether something has changed, it should only depend
-  // on the amount of time the relay has been off
-  //if (displayDirty || targetDirty) {
-    controlTemperature(now, lastValidTempC, targetTenthsC);
-  //}
+  // Relay control based on temperature -- it should monitor temperature regardless
+  // of whether something has changed, it should only depend on the amount of time
+  // the relay has been off. Mark the display as dirty if the relay changes state.
+  displayDirty |= controlTemperature(now, lastValidTempC, targetTenthsC);
 
   // Single display update point: update once per loop if any condition requested it.
   if (displayDirty) {
