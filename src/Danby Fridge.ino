@@ -90,7 +90,7 @@ typedef struct {
 
 ThermistorState thermState;
 
- // Internal state stored in tenths of °C to avoid non-atomic float access
+// Internal state stored in tenths of °C to avoid non-atomic float access
 volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
 
 // Quadrature decoder state (4-bit history) and pulse accumulator.
@@ -98,7 +98,7 @@ volatile int16_t targetTenthsC = 250; // tenths of a degree C = 25.0°C
 volatile uint8_t rot_state = 0;
 volatile int16_t encoderPulseCount = 0;
  
- // Persistence helpers
+// Persistence helpers
 unsigned long lastSaveMs = 0;
 
 // Compressor/relay safety
