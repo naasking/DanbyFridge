@@ -5,10 +5,6 @@
 #include "rotary.h"
 #include <esp_sleep.h>
 #include <esp_pm.h>
-#include "driver/rmt.h"
-#include "soc/rmt_reg.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/ringbuf.h"
 #include "async.h"
 
 // Preferences instance for non-volatile storage on ESP32
@@ -54,7 +50,7 @@ static Preferences prefs;
 
 #define DISPLAY_UPDATE_INTERVAL 200
 #define CONTROL_INTERVAL 10000
-#define HYSTERESIS_TENTHS 3      // 0.2°C hysteresis
+#define HYSTERESIS_TENTHS 5      // 0.5°C hysteresis
 #define ENCODER_STEP_TENTHS 1    // 0.1°C per encoder step
 #define ENCODER_PULSES_PER_STEP 2 // quadrature pulses per mechanical detent (tune if needed)
 #define BUTTON_DEBOUNCE_MS 50
@@ -345,7 +341,7 @@ async readThermistor(ThermistorState *s, unsigned long now, float* temp) {
       // Beta equation
       float invT = (1.0f / T0) + (1.0f / BETA) * logf(rTherm / R0);
       float tempK = 1.0f / invT;
-      float tempC = tempK - 273.15f - 1.7f; // 1.7C bias as measured by ice slurry
+      float tempC = tempK - 273.15f - 1.0f; // +1.0C bias as measured by ice slurry
       _printf("Temp: %f", tempC);
       if (s->expMovingAvg) {
         *temp = EMA_ALPHA * tempC  + (1.0f - EMA_ALPHA) * *temp;
