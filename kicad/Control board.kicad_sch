@@ -648,6 +648,209 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "Connector_Generic:Conn_02x02_Odd_Even"
+			(pin_names
+				(offset 1.016)
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "J5"
+				(at -0.0001 2.54 90)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+					(hide yes)
+				)
+			)
+			(property "Value" "USB Charger"
+				(at 1.27 -6.604 90)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Datasheet" "~"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Description" "Generic connector, double row, 02x02, odd/even pin numbering scheme (row 1 odd numbers, row 2 even numbers), script generated (kicad-library-utils/schlib/autogen/connector/)"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "ki_keywords" "connector"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "ki_fp_filters" "Connector*:*_2x??_*"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(symbol "Conn_02x02_Odd_Even_1_1"
+				(rectangle
+					(start -1.27 6.35)
+					(end 3.81 -7.62)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+				(rectangle
+					(start -1.27 0.127)
+					(end 0 -0.127)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(rectangle
+					(start -1.27 -2.413)
+					(end 0 -2.667)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(rectangle
+					(start 3.81 0.127)
+					(end 2.54 -0.127)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(rectangle
+					(start 3.81 -2.413)
+					(end 2.54 -2.667)
+					(stroke
+						(width 0.1524)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(pin passive line
+					(at -5.08 0 0)
+					(length 3.81)
+					(name "Pin_1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "L"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at -5.08 -2.54 0)
+					(length 3.81)
+					(name "Pin_3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "5V"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 7.62 0 180)
+					(length 3.81)
+					(name "Pin_2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "N"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 7.62 -2.54 180)
+					(length 3.81)
+					(name "Pin_4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "GND"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "Connector_Generic_MountingPin:Conn_02x08_Counter_Clockwise_MountingPin"
 			(pin_names
 				(offset 1.016)
@@ -2766,10 +2969,22 @@
 		(uuid "11358509-f70f-4671-b53a-2979b2ba23ce")
 	)
 	(junction
+		(at 81.28 44.45)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "20aae8b4-eec3-4d36-a4b3-4ce7f5b70648")
+	)
+	(junction
 		(at 127 110.49)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "3af26d4f-0150-49d7-a2f7-1df2b2304c7a")
+	)
+	(junction
+		(at 81.28 58.42)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "453f9c19-6596-4b1a-8568-f11f8ea06329")
 	)
 	(junction
 		(at 110.49 104.14)
@@ -2819,7 +3034,27 @@
 	)
 	(wire
 		(pts
-			(xy 81.28 48.26) (xy 81.28 39.37)
+			(xy 72.39 58.42) (xy 81.28 58.42)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "05158a74-922d-41a2-87b6-f4e3019842af")
+	)
+	(wire
+		(pts
+			(xy 72.39 58.42) (xy 72.39 57.15)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "08146208-3dd2-4e7b-9371-9cf9624ae635")
+	)
+	(wire
+		(pts
+			(xy 81.28 48.26) (xy 81.28 44.45)
 		)
 		(stroke
 			(width 0)
@@ -3179,6 +3414,16 @@
 	)
 	(wire
 		(pts
+			(xy 81.28 54.61) (xy 81.28 58.42)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "baf619be-482e-4d00-8c48-f35112fecc34")
+	)
+	(wire
+		(pts
 			(xy 132.08 105.41) (xy 134.62 105.41)
 		)
 		(stroke
@@ -3196,16 +3441,6 @@
 			(type default)
 		)
 		(uuid "c2e0e206-90ab-41bf-bbd3-1f5a4114a2b7")
-	)
-	(wire
-		(pts
-			(xy 81.28 60.96) (xy 81.28 54.61)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "c99bcb1c-9568-4389-84fe-5ab93fc51bf9")
 	)
 	(wire
 		(pts
@@ -3319,6 +3554,36 @@
 	)
 	(wire
 		(pts
+			(xy 81.28 58.42) (xy 81.28 60.96)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f5b371b7-0c67-4f41-9b9f-105e730ef11a")
+	)
+	(wire
+		(pts
+			(xy 72.39 44.45) (xy 81.28 44.45)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f75f40a6-f54e-425a-b812-efef6b9b0512")
+	)
+	(wire
+		(pts
+			(xy 81.28 44.45) (xy 81.28 39.37)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f906b328-f555-4829-8743-ec51a7859f47")
+	)
+	(wire
+		(pts
 			(xy 124.46 64.77) (xy 121.92 64.77)
 		)
 		(stroke
@@ -3422,6 +3687,7 @@
 					(size 1.27 1.27)
 				)
 				(justify left)
+				(hide yes)
 			)
 		)
 		(property "Value" "PTC Starter"
@@ -3935,6 +4201,72 @@
 			(project "Control board"
 				(path "/9f49b8a2-2498-48eb-a158-04b48c8bd0cd"
 					(reference "#PWR07")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:VCCQ")
+		(at 69.85 44.45 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "457113f0-793a-4775-8310-d54bfde3dc72")
+		(property "Reference" "#PWR017"
+			(at 69.85 48.26 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "5V"
+			(at 71.374 43.18 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 69.85 44.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 69.85 44.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"VCCQ\""
+			(at 69.85 44.45 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "bdcdeb07-ad0e-43a1-b126-cc53b2cefb49")
+		)
+		(instances
+			(project "Control board"
+				(path "/9f49b8a2-2498-48eb-a158-04b48c8bd0cd"
+					(reference "#PWR017")
 					(unit 1)
 				)
 			)
@@ -4632,6 +4964,71 @@
 		)
 	)
 	(symbol
+		(lib_id "power:GND")
+		(at 69.85 57.15 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "8b69413c-6b96-4053-93c2-b0a2766d4052")
+		(property "Reference" "#PWR016"
+			(at 69.85 63.5 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Value" "GND"
+			(at 69.85 61.214 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 69.85 57.15 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" ""
+			(at 69.85 57.15 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 69.85 57.15 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "1"
+			(uuid "1c09750e-13a2-4ac3-bf16-80e595591849")
+		)
+		(instances
+			(project "Control board"
+				(path "/9f49b8a2-2498-48eb-a158-04b48c8bd0cd"
+					(reference "#PWR016")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:VCC")
 		(at 93.98 80.01 0)
 		(unit 1)
@@ -4960,6 +5357,82 @@
 			(project ""
 				(path "/9f49b8a2-2498-48eb-a158-04b48c8bd0cd"
 					(reference "C1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Connector_Generic:Conn_02x02_Odd_Even")
+		(at 72.39 49.53 270)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "c35d0a2b-1ea8-4088-957a-4da4cc81e01b")
+		(property "Reference" "J5"
+			(at 74.93 49.5299 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+		(property "Value" "USB Charger"
+			(at 65.786 50.8 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" ""
+			(at 72.39 49.53 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 72.39 49.53 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Generic connector, double row, 02x02, odd/even pin numbering scheme (row 1 odd numbers, row 2 even numbers), script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 72.39 49.53 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "L"
+			(uuid "1cc3a33e-2cd9-4c31-aef2-4f2cb8c0191f")
+		)
+		(pin "N"
+			(uuid "b0cf8419-39a2-41ae-9651-be4469bcd4ae")
+		)
+		(pin "5V"
+			(uuid "c556ac70-3e3c-4501-bb8f-50fe67f54d35")
+		)
+		(pin "GND"
+			(uuid "fe169f8e-b65f-44ae-9687-330cc79a1daf")
+		)
+		(instances
+			(project ""
+				(path "/9f49b8a2-2498-48eb-a158-04b48c8bd0cd"
+					(reference "J5")
 					(unit 1)
 				)
 			)
