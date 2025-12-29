@@ -12,7 +12,7 @@ static Preferences prefs;
 
 // === ESP32-C3 Super mini Pin Mapping ===
 #define THERM_PIN       0  // Safe -- connected to thermistor
-#define RELAY_PIN       21 // Safe -- connected to HW-040 relay module
+#define RELAY_PIN       21 // Safe -- connected to KY-019 relay module
 #define VREF_PIN        1  // Safe -- connected to voltage reference to correct for voltage dips
 
 // Rotary encoder -- grouped on the right side
