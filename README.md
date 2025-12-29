@@ -48,6 +48,14 @@ repository. They simplified the code a lot, and I was able to easily tell GPT-5 
 some of the code using these headers. It also suggested a few refinements to the headers
 which then made it upstream. Neat.
 
+# Microcontroller Circuit
+
+This is a rough schematic of the controller portion:
+
+![Interface](imgs/schematic.png)
+
+It's just missing the small snubber circuit across the relay's AC pins.
+
 # Future Work
 
 ## Microcontroller Sleep
